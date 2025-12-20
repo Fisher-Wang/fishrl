@@ -15,7 +15,7 @@ env.close()
 
 print()
 
-env = ManiskillVecEnv("PickCube-v1", num_envs=4, seed=0, device="cuda", obs_mode="state")
+env = ManiskillVecEnv("PickCube-v1", num_envs=4, seed=0, device="cuda", obs_mode="prop")
 print(env.single_action_space)
 print(env.action_space)
 print(env.single_observation_space)

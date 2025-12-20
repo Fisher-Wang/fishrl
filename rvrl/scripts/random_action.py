@@ -33,13 +33,26 @@ class VideoWriter:
         iio.mimsave(self.video_path, self.images, fps=fps)
 
 
-def main(env_id: str = "maniskill/TurnFaucet-v1", image_size: tuple[int, int] = (64, 64)):
-    env = create_vector_env(env_id, num_envs=1, seed=0, device="cuda", obs_mode="both", image_size=image_size)
+def main(
+    env_id: str = "maniskill/TurnFaucet-v1",
+    image_size: tuple[int, int] = (64, 64),
+    rv_sim: str = "mujoco",
+    num_envs: int = 1,
+):
+    env = create_vector_env(
+        env_id,
+        num_envs=num_envs,
+        seed=0,
+        device="cuda",
+        obs_mode="rgb,prop",
+        image_size=image_size,
+        scenario_cfg=dict(simulator=rv_sim),
+    )
     obs, _ = env.reset()
     video_writer = VideoWriter(f"random_action_{env_id.replace('/', '_')}.mp4")
     video_writer.add(obs["rgb"])
     for _ in range(100):
-        action = torch.randn(env.action_space.shape)
+        action = torch.rand(env.action_space.shape, device=env.device) * 2 - 1
         obs, _, _, _, _ = env.step(action)
         video_writer.add(obs["rgb"])
     video_writer.save()

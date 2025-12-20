@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
 from typing import Any
 
+import numpy as np
 from loguru import logger as log
+from matplotlib.figure import Figure
 
 
 class Ratio:
@@ -47,3 +50,13 @@ class Ratio:
         self._prev = state_dict["_prev"]
         self._pretrain_steps = state_dict["_pretrain_steps"]
         return self
+
+
+def fig_to_array(fig: Figure) -> np.ndarray:
+    with io.BytesIO() as buff:
+        fig.savefig(buff, format="raw")
+        buff.seek(0)
+        data = np.frombuffer(buff.getvalue(), dtype=np.uint8)
+    w, h = fig.canvas.get_width_height()
+    fig_array = data.reshape((int(h), int(w), -1))
+    return fig_array

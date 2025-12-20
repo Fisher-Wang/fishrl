@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import gymnasium as gym
 
 from rvrl.envs import BaseVecEnv
+from rvrl.wrapper.flatten_obs_by_key_wrapper import FlattenObsByKeyWrapper
 from rvrl.wrapper.numpy_to_torch_wrapper import NumpyToTorch
 from rvrl.wrapper.sync_vector_set_state_wrapper import SyncVectorSetStateWrapper
 
@@ -15,12 +14,14 @@ SEED_SPACING = 1_000_000
 
 def create_vector_env(
     env_id: str,
-    obs_mode: Literal["rgb", "state", "both"],
+    obs_mode: str,
     num_envs: int,
     seed: int,
     action_repeat: int = 1,
     image_size: tuple[int, int] = (64, 64),
     device: str = "cuda",
+    no_render_if_possible: bool = False,
+    **kwargs,
 ) -> BaseVecEnv:
     """
     Create a vectorized environment.
@@ -50,9 +51,9 @@ def create_vector_env(
             )
             for i in range(num_envs)
         ]
-        if obs_mode == "state":
-            env_fns = [lambda: gym.wrappers.FlattenObservation(func()) for func in env_fns]
-        # envs = gym.vector.SyncVectorEnv(env_fns)
+        if "prop" in obs_mode.split(","):
+            breakpoint()
+            env_fns = [lambda: FlattenObsByKeyWrapper(func(), ["prop"]) for func in env_fns]
         envs = SyncVectorSetStateWrapper(env_fns)
         envs = NumpyToTorch(envs, device)
         return envs
@@ -76,7 +77,7 @@ def create_vector_env(
     elif env_id.startswith("isaacgymenv/"):
         from .isaacgym_env import IsaacGymEnv
 
-        assert obs_mode == "state", "isaacgymenv only supports state observation"
+        assert obs_mode == "prop", "isaacgymenv only supports state observation"
         envs = IsaacGymEnv(env_id.replace("isaacgymenv/", ""), num_envs, seed, device)
         return envs
     elif env_id.startswith("gym/"):  # gymnasium native envs
@@ -95,14 +96,22 @@ def create_vector_env(
         envs = NumpyToTorch(envs, device)
         return envs
     elif env_id.startswith("maniskill/"):
-        from .maniskill_env import ManiskillVecEnv
+        from .maniskill_env import ManiskillVecEnvWithoutRender, ManiskillVecEnvWithRender
 
-        envs = ManiskillVecEnv(env_id.replace("maniskill/", ""), num_envs, seed, device, obs_mode, image_size)
-        return envs
-    elif env_id.startswith("roboverse/"):
-        from .roboverse_env import RoboverseEnv
+        if no_render_if_possible and "rgb" not in obs_mode.split(","):
+            envs = ManiskillVecEnvWithoutRender(
+                env_id.replace("maniskill/", ""), num_envs, seed, device, obs_mode, image_size
+            )
+        else:
+            envs = ManiskillVecEnvWithRender(
+                env_id.replace("maniskill/", ""), num_envs, seed, device, obs_mode, image_size
+            )
 
-        envs = RoboverseEnv(env_id.replace("roboverse/", ""), num_envs, seed, device, obs_mode, image_size)
         return envs
+    elif env_id.startswith("client/"):
+        from .client_env import ClientEnv
+
+        host, port = env_id.replace("client/", "").split(":")
+        return ClientEnv(int(port), host=host)
     else:
         raise ValueError(f"Unknown environment: {env_id}")

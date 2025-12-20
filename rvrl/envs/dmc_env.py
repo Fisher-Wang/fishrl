@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections import OrderedDict
-from typing import Any, Literal
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -62,7 +62,7 @@ class DMControlEnv(gym.Env):
         env_id: str,
         seed: int,
         image_size: tuple[int, int],
-        obs_mode: Literal["rgb", "state", "both"],
+        obs_mode: str,
         action_repeat: int = 1,
     ):
         domain_name = env_id.split("-")[0]
@@ -75,9 +75,6 @@ class DMControlEnv(gym.Env):
         self._obs_space = self._get_obs_space(dm_spec2gym_space(self.env.observation_spec()))
         self._true_action_space = dm_spec2gym_space(self.env.action_spec())
         self._norm_action_space = spaces.Box(low=-1, high=1, shape=self._true_action_space.shape, dtype=np.float32)
-
-        self._raw_state_space = spaces.Box(low=-1, high=1, shape=self.env.physics.get_state().shape, dtype=np.float32)
-        self._obs_space["raw_state"] = self._raw_state_space
 
         self._obs_space.seed(seed)
         self._true_action_space.seed(seed)
@@ -94,28 +91,26 @@ class DMControlEnv(gym.Env):
         return action
 
     def _get_obs_space(self, original_obs_space: spaces.Space) -> spaces.Space:
-        if self.obs_mode == "state":
-            return original_obs_space
-        rgb_obs_space = spaces.Box(low=0, high=1, shape=(3, self.width, self.height), dtype=np.float32)
-        if self.obs_mode == "rgb":
-            return rgb_obs_space
-        elif self.obs_mode == "both":
-            return spaces.Dict({"rgb": rgb_obs_space, "state": original_obs_space})
+        space_dict = {}
+        if "prop" in self.obs_mode.split(","):
+            space_dict["prop"] = original_obs_space
+        if "rgb" in self.obs_mode.split(","):
+            space_dict["rgb"] = spaces.Box(low=0, high=1, shape=(3, self.width, self.height), dtype=np.float32)
+        if "state" in self.obs_mode.split(","):
+            space_dict["state"] = spaces.Box(low=-1, high=1, shape=self.env.physics.get_state().shape, dtype=np.float32)
+        return spaces.Dict(space_dict)
 
-    def _get_obs(self, timestep) -> np.ndarray | dict[str, np.ndarray]:
-        if self.obs_mode == "state":
-            return timestep.observation
-        rgb = self.env.physics.render(width=self.width, height=self.height, camera_id=self._camera_id)
-        rgb = np.transpose(rgb, (2, 0, 1)).copy() / 255.0  # (H, W, 3) -> (3, H, W)
-        if self.obs_mode == "rgb":
-            return rgb
-        elif self.obs_mode == "both":
-            # NOTE: add raw_state to obs to support set_state
-            return {
-                "rgb": rgb,
-                "state": timestep.observation,
-                "raw_state": self.env.physics.get_state(),
-            }
+    def _get_obs(self, timestep) -> dict[str, np.ndarray]:
+        obs_dict = {}
+        if "state" in self.obs_mode.split(","):
+            obs_dict["state"] = self.env.physics.get_state()
+        if "prop" in self.obs_mode.split(","):
+            obs_dict["prop"] = timestep.observation
+        if "rgb" in self.obs_mode.split(","):
+            rgb = self.env.physics.render(width=self.width, height=self.height, camera_id=self._camera_id)
+            rgb = np.transpose(rgb, (2, 0, 1)).copy() / 255.0  # (H, W, 3) -> (3, H, W)
+            obs_dict["rgb"] = rgb
+        return obs_dict
 
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict]:
         timestep = self.env.reset()

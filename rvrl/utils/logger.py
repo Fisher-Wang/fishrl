@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import copy
 import json
 import re
 from collections import defaultdict
@@ -9,7 +10,6 @@ from typing import Any
 
 import numpy as np
 import torch
-import copy
 
 TensorArray = torch.Tensor | np.ndarray
 
@@ -70,6 +70,11 @@ class WandbOutput(BaseOutput):
             if isinstance(value, TensorArray) and len(value.shape) == 4:
                 assert value.shape[1] in [1, 3, 4], "Video shape should be (T, C, H, W)"
                 bystep[step][name] = wandb.Video(value, fps=15, format="mp4")
+            elif isinstance(value, TensorArray) and len(value.shape) == 3:
+                if value.shape[2] in [1, 3, 4]:
+                    value = value.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+                assert value.shape[0] in [1, 3, 4], "Image shape should be (C, H, W)"
+                bystep[step][name] = wandb.Image(value)
             else:
                 bystep[step][name] = value
         for step, metrics in bystep.items():
@@ -118,6 +123,11 @@ class TensorboardOutput(AsyncOutput):
                 assert value.shape[1] in [1, 3, 4], "Video shape should be (T, C, H, W)"
                 value = value.unsqueeze(0)  # (T, C, H, W) -> (1, T, C, H, W)
                 self.writer.add_video(name, value, step, fps=15)
+            elif isinstance(value, TensorArray) and len(value.shape) == 3:
+                if value.shape[2] in [1, 3, 4]:
+                    value = value.permute(2, 0, 1)  # (H, W, C) -> (C, H, W)
+                assert value.shape[0] in [1, 3, 4], "Image shape should be (C, H, W)"
+                self.writer.add_image(name, value, step, dataformats="CHW")
             else:
                 self.writer.add_scalar(name, value, step)
 

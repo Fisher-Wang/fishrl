@@ -22,6 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from rvrl.envs import create_vector_env
+from rvrl.wrapper import UnwrapDictWrapper
 
 
 ########################################################
@@ -66,40 +67,86 @@ class Args:
     lr: float = 3e-4
     gamma: float = 0.99
     gae_lambda: float = 0.95
+    num_minibatches: int = 32
     epochs: int = 10
     total_timesteps: int = 1000000
     anneal_lr: bool = True
     device: str = "cuda"  # Device for IsaacLab environments
     window_size: int = 100
+    rv_sim: str = "mujoco"
+
+    # network
+    num_layers: int = 2
+    hidden_dim: int = 64
+    init_actor_logstd: float = 0.0
+
+    # evaluation
+    eval_every: int = -1
+    """evaluate every N iterations. -1 means no evaluation"""
+    eval_num_envs: int = -1
+    """number of evaluation environments. -1 means same as num_envs"""
+    eval_num_steps: int = -1
+    """number of evaluation steps. -1 means same as num_steps"""
+    eval_ignore_done: bool = False
+    """continue evaluation even if all environments are done"""
+    eval_env_id: str | None = None
+    """evaluation environment id. if None, use the same as env_id"""
+
+    def __post_init__(self):
+        if self.eval_num_envs == -1:
+            self.eval_num_envs = self.num_envs
+        if self.eval_num_steps == -1:
+            self.eval_num_steps = self.num_steps
+        if self.eval_env_id is None:
+            self.eval_env_id = self.env_id
 
 
 ########################################################
 ## Networks
 ########################################################
+def init_weights(std=np.sqrt(2), bias_const=0.0):
+    def f(m):
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight, std)
+            nn.init.constant_(m.bias, bias_const)
+        return m
+
+    return f
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, act: nn.Module):
+        super().__init__()
+        layers = []
+        for _ in range(num_layers):
+            layers.extend([nn.Linear(input_dim, hidden_dim), act()])
+            input_dim = hidden_dim
+        layers.append(nn.Linear(input_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
 class Agent(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, envs, hidden_dim: int, num_layers: int, init_actor_logstd: float):
         super().__init__()
         action_dim = np.prod(envs.single_action_space.shape)
         obs_dim = np.prod(envs.single_observation_space.shape)
-        self.critic = nn.Sequential(
-            nn.Linear(obs_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, 1),
-        )
-        self.actor_mean = nn.Sequential(
-            nn.Linear(obs_dim, 64),
-            nn.Tanh(),
-            nn.Linear(64, 64),
-            nn.Tanh(),
-            nn.Linear(64, action_dim),
-        )
-        # XXX: why log?
-        self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
+        self.critic = MLP(obs_dim, hidden_dim, 1, num_layers, nn.Tanh)
+        self.actor_mean = MLP(obs_dim, hidden_dim, action_dim, num_layers, nn.Tanh)
+        # Orthogonal Initialization of Weights and Constant Initialization of biases (core-2)
+        [m.apply(init_weights()) for m in self.critic.net[:-1]]
+        self.critic.net[-1].apply(init_weights(std=1.0))
+        [m.apply(init_weights()) for m in self.actor_mean.net[:-1]]
+        self.actor_mean.net[-1].apply(init_weights(std=0.01))
 
-    def get_action(self, obs: torch.Tensor, action: torch.Tensor | None = None):
+        self.actor_logstd = nn.Parameter(torch.ones(1, action_dim) * init_actor_logstd)
+
+    def get_action(self, obs: torch.Tensor, action: torch.Tensor | None = None, deterministic: bool = False):
         action_mean = self.actor_mean(obs)
+        if deterministic:
+            return action_mean
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
@@ -117,13 +164,13 @@ class Agent(nn.Module):
 def main():
     args = tyro.cli(Args)
     batch_size = args.num_envs * args.num_steps
-    mini_batch_size = batch_size // 32
+    mini_batch_size = batch_size // args.num_minibatches
     num_iterations = args.total_timesteps // batch_size
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     log.info(f"Using device: {device}" + (f" (GPU {torch.cuda.current_device()})" if torch.cuda.is_available() else ""))
     seed_everything(args.seed)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{args.env_id}__{args.exp_name}__env={args.num_envs}__lr={args.lr:.0e}__seed={args.seed}__{timestamp}"
+    run_name = f"{args.env_id}__{args.exp_name}__env={args.num_envs}__lr={args.lr:.0e}__annealLr={args.anneal_lr}__seed={args.seed}__{timestamp}"
     writer = SummaryWriter(f"logdir/{run_name}")
     writer.add_text(
         "hyperparameters",
@@ -133,17 +180,30 @@ def main():
     # Use the unified environment interface
     envs = create_vector_env(
         args.env_id,
-        "state",
+        "prop",
         args.num_envs,
         args.seed,
         device=args.device,
+        scenario_cfg=dict(simulator=args.rv_sim),
     )
+    envs = UnwrapDictWrapper(envs)
+
+    if args.eval_every > 0:
+        eval_envs = create_vector_env(
+            args.eval_env_id,
+            "prop",
+            args.eval_num_envs,
+            args.seed,
+            device=args.device,
+        )
+        eval_envs = UnwrapDictWrapper(eval_envs)
 
     log.info(f"{envs.single_action_space.shape=}")
     log.info(f"{envs.single_observation_space.shape=}")
 
     obs, _ = envs.reset()
-    agent = Agent(envs).to(device)
+    assert obs.ndim == 2
+    agent = Agent(envs, args.hidden_dim, args.num_layers, args.init_actor_logstd).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
 
     obss = torch.zeros((args.num_steps + 1, args.num_envs) + envs.single_observation_space.shape, device=device)
@@ -166,7 +226,26 @@ def main():
     global_step = 0
 
     for iteration in tqdm(range(num_iterations)):
-        ## anneal lr
+        ## evaluation
+        if args.eval_every > 0 and iteration % args.eval_every == 1:
+            eval_obs, _ = eval_envs.reset()
+            eval_episodic_return = torch.zeros(args.eval_num_envs, device=device)
+            eval_done_once = torch.zeros(args.eval_num_envs, device=device)
+            for _ in range(args.eval_num_steps):
+                with torch.inference_mode():
+                    eval_action = agent.get_action(eval_obs, deterministic=True)
+                eval_obs, eval_reward, eval_terminated, eval_truncated, eval_infos = eval_envs.step(eval_action)
+                eval_done = torch.logical_or(eval_terminated, eval_truncated)
+                eval_done_once = torch.logical_or(eval_done_once, eval_done)
+                if not args.eval_ignore_done:
+                    eval_reward[eval_done_once] = 0
+                eval_episodic_return += eval_reward
+                if not args.eval_ignore_done and eval_done_once.all():
+                    break
+
+            writer.add_scalar("charts/eval_episodic_return", eval_episodic_return.mean().item(), global_step)
+
+        ## anneal lr (core-4)
         if args.anneal_lr:
             lr = args.lr * (1 - iteration / num_iterations)
             for param_group in optimizer.param_groups:
@@ -181,6 +260,7 @@ def main():
                 value = agent.get_value(obs)
 
             next_obs, reward, terminated, truncated, infos = envs.step(action)
+            assert next_obs.ndim == 2
             next_done = torch.logical_or(terminated, truncated)
 
             cur_rewards_sum += reward

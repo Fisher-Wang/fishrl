@@ -9,12 +9,12 @@ from gymnasium import spaces
 
 
 class HumanoidBenchEnv(gym.Env):
-    def __init__(self, env_id: str, seed: int, image_size: tuple[int, int], obs_mode: Literal["rgb", "state"]):
+    def __init__(self, env_id: str, seed: int, image_size: tuple[int, int], obs_mode: Literal["rgb", "prop"]):
         self.env = gym.make(env_id, render_mode="rgb_array", width=image_size[0], height=image_size[1])
         self._obs_mode = obs_mode
         if obs_mode == "rgb":
             self._obs_space = spaces.Box(low=0, high=1, shape=(3, image_size[0], image_size[1]), dtype=np.float32)
-        elif obs_mode == "state":
+        elif obs_mode == "prop":
             self._obs_space = self.env.observation_space
         self._action_space = self.env.action_space
         self._obs_space.seed(seed)

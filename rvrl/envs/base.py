@@ -23,11 +23,11 @@ class BaseVecEnv(ABC):
         pass
 
     @abstractmethod
-    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[Tensor, Info]:
+    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[dict[str, Tensor], Info]:
         pass
 
     @abstractmethod
-    def step(self, action: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor, Info]:
+    def step(self, action: Tensor) -> tuple[dict[str, Tensor], Tensor, Tensor, Tensor, Info]:
         pass
 
     @abstractmethod
