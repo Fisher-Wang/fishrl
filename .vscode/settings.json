@@ -1,6 +1,6 @@
 {
     // Python interpreter (change this to your own path)
-    "python.defaultInterpreterPath": "/home/ghr/fs/miniforge3/envs/rvrl/bin/python",
+    "python.defaultInterpreterPath": "/home/ghr/fs/miniforge3/envs/fishrl/bin/python",
 
     // Formatting
     "[python]": {

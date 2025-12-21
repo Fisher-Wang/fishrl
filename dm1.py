@@ -27,8 +27,8 @@ from torch import Tensor
 from torch.distributions import Distribution, Independent, Normal, TanhTransform, TransformedDistribution, kl_divergence
 from torch.utils.tensorboard.writer import SummaryWriter
 
-from rvrl.envs.env_factory import create_vector_env
-from rvrl.utils.reproducibility import enable_deterministic_run, seed_everything
+from fishrl.envs.env_factory import create_vector_env
+from fishrl.utils.reproducibility import enable_deterministic_run, seed_everything
 
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 

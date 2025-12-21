@@ -3,7 +3,7 @@ from typing import Any
 import gymnasium as gym
 from isaaclab.app import AppLauncher
 
-from rvrl.envs import BaseVecEnv
+from fishrl.envs import BaseVecEnv
 
 app_launcher = AppLauncher(headless=True)
 simulation_app = app_launcher.app

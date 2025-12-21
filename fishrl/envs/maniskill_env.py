@@ -12,7 +12,7 @@ from mani_skill.utils.wrappers.flatten import FlattenActionSpaceWrapper, Flatten
 from mani_skill.vector.wrappers.gymnasium import ManiSkillVectorEnv
 from torch import Tensor
 
-from rvrl.envs import BaseVecEnv
+from fishrl.envs import BaseVecEnv
 
 
 class ManiskillVecEnvWithoutRender(BaseVecEnv):

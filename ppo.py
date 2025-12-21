@@ -21,8 +21,8 @@ from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from rvrl.envs import create_vector_env
-from rvrl.wrapper import UnwrapDictWrapper
+from fishrl.envs import create_vector_env
+from fishrl.wrapper import UnwrapDictWrapper
 
 
 ########################################################

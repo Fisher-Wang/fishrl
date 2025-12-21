@@ -8,7 +8,7 @@ from isaacgymenvs.tasks import isaacgym_task_map
 from isaacgymenvs.tasks.base.vec_task import VecTask
 from isaacgymenvs.utils.reformat import omegaconf_to_dict
 
-from rvrl.envs import BaseVecEnv
+from fishrl.envs import BaseVecEnv
 
 
 class IsaacGymEnv(BaseVecEnv):

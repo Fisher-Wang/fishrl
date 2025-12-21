@@ -1,5 +1,5 @@
 [project]
-name = "rvrl"
+name = "fishrl"
 version = "0.0.1"
 requires-python = ">=3.8"
 dependencies = [
@@ -45,7 +45,7 @@ isaacgym = [
 ]
 
 [tool.setuptools]
-packages = ["rvrl"]
+packages = ["fishrl"]
 
 [tool.ruff]
 line-length = 120
@@ -74,7 +74,7 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"rvrl/envs/isaaclab_env.py" = ["FA"]  # isaaclab only supports Python 3.10
+"fishrl/envs/isaaclab_env.py" = ["FA"]  # isaaclab only supports Python 3.10
 
 [tool.uv]
 index-strategy = "unsafe-first-match"

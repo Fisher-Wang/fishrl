@@ -1,6 +1,6 @@
 import torch
 
-from rvrl.envs.maniskill_env import ManiskillVecEnv
+from fishrl.envs.maniskill_env import ManiskillVecEnv
 
 env = ManiskillVecEnv("TurnFaucet-v1", num_envs=4, seed=0, device="cuda", obs_mode="rgb", image_size=(64, 64))
 print(env.single_action_space)

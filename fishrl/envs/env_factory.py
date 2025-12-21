@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import gymnasium as gym
 
-from rvrl.envs import BaseVecEnv
-from rvrl.wrapper.flatten_obs_by_key_wrapper import FlattenObsByKeyWrapper
-from rvrl.wrapper.numpy_to_torch_wrapper import NumpyToTorch
-from rvrl.wrapper.sync_vector_set_state_wrapper import SyncVectorSetStateWrapper
+from fishrl.envs import BaseVecEnv
+from fishrl.wrapper.flatten_obs_by_key_wrapper import FlattenObsByKeyWrapper
+from fishrl.wrapper.numpy_to_torch_wrapper import NumpyToTorch
+from fishrl.wrapper.sync_vector_set_state_wrapper import SyncVectorSetStateWrapper
 
 SEED_SPACING = 1_000_000
 

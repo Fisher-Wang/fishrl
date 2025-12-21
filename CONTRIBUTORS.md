@@ -1,6 +1,6 @@
-# RVRL Developers and Contributors
+# FishRL Developers and Contributors
 
-This is the official list of RVRL Project developers and contributors.
+This is the official list of FishRL Project developers and contributors.
 
 ## Developers
 

@@ -25,10 +25,10 @@ from torch.utils.tensorboard.writer import SummaryWriter
 from torchmetrics import MeanMetric
 from tqdm import tqdm
 
-from rvrl.envs.env_factory import create_vector_env
-from rvrl.utils.metrics import MetricAggregator
-from rvrl.utils.reproducibility import enable_deterministic_run, seed_everything
-from rvrl.utils.timer import timer
+from fishrl.envs.env_factory import create_vector_env
+from fishrl.utils.metrics import MetricAggregator
+from fishrl.utils.reproducibility import enable_deterministic_run, seed_everything
+from fishrl.utils.timer import timer
 
 
 ########################################################

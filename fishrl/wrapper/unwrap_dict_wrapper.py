@@ -3,7 +3,7 @@ import warnings
 import gymnasium as gym
 import numpy as np
 
-from rvrl.envs.base import BaseVecEnv
+from fishrl.envs.base import BaseVecEnv
 
 
 class UnwrapDictWrapper(gym.Wrapper):

@@ -11,7 +11,7 @@ import tyro
 from torch import Tensor
 from torchvision.utils import make_grid
 
-from rvrl.envs import create_vector_env
+from fishrl.envs import create_vector_env
 
 
 class VideoWriter:

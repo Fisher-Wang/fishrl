@@ -6,8 +6,8 @@ os.environ["MUJOCO_GL"] = "egl"
 
 import tyro
 
-from rvrl.envs import create_vector_env
-from rvrl.envs.client_env import Server
+from fishrl.envs import create_vector_env
+from fishrl.envs.client_env import Server
 
 
 def main(
