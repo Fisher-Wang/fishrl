@@ -1,6 +1,6 @@
 {
     // Python interpreter (change this to your own path)
-    "python.defaultInterpreterPath": "/home/ghr/fs/miniforge3/envs/fishrl/bin/python",
+    "python.defaultInterpreterPath": "${env:HOME}/miniforge3/envs/fishrl/bin/python",
 
     // Formatting
     "[python]": {
@@ -9,7 +9,7 @@
         "editor.formatOnSave": true,
         "editor.codeActionsOnSave": {
             "source.organizeImports": "explicit"
-        },
+        }
     },
     "files.insertFinalNewline": true,
     "files.trimFinalNewlines": true,
@@ -24,10 +24,10 @@
         "**/__pycache__": true,
         "**/.ruff_cache": true,
         "**/*.egg-info": true,
-        "build": true,
+        "build": true
     },
     "search.exclude": {
-        "logdir": true,
+        "logdir": true
     },
 
     // Python extra paths
@@ -39,6 +39,6 @@
         "${workspaceFolder}/third_party/IsaacLab/source/isaaclab_rl",
         "${workspaceFolder}/third_party/IsaacLab/source/isaaclab_tasks",
         /* IsaacGymEnvs */
-        "${workspaceFolder}/third_party/IsaacGymEnvs",
+        "${workspaceFolder}/third_party/IsaacGymEnvs"
     ],
 }
