@@ -4,9 +4,9 @@ FishRL is a collection of popular deep reinforcement learning algorithms impleme
 
 In addition to algorithm implementations, FishRL focuses on the following practical aspects:
 
-- **Unified environment interface.** FishRL supports multiple robotics and embodied AI environments through a unified interface layer. This part is implemented independently of specific algorithms and can be reused to quickly test new algorithms across different simulators with minimal additional engineering.
+- **Unified environment interface.** FishRL supports multiple robotics and embodied AI environments through a unified interface. This interface can be reused to quickly test new algorithms across different simulation environments with minimal additional engineering for research purposes.
 
-- **Efficient benchmarking.** To facilitate fair and large-scale benchmarking, all algorithms are implemented with optimized training pipelines and common acceleration techniques. Compared to naïve PyTorch implementations, FishRL typically achieves 3–10× speedup, and is competitive with JAX-based implementations in terms of training throughput.
+- **Efficient benchmarking.** For large-scale benchmarking, FishRL implements optimized training pipelines and common acceleration techniques. Inspired by [LeanRL](https://github.com/meta-pytorch/LeanRL), FishRL typically achieves 3–10× speedup compared to naïve PyTorch implementations, and is competitive with JAX-based implementations in terms of training throughput.
 
 - **Single-file, readable implementations.** Following the philosophy of [CleanRL](https://github.com/vwxyzjn/cleanrl), FishRL keeps each algorithm in a single, self-contained file whenever possible, while sharing common RL utilities. This design emphasizes readability and ease of modification, making it convenient to understand, debug, and extend the algorithms.
 
@@ -22,10 +22,16 @@ The `benchmark` option specifies the packages version for the reproducibility of
 
 ### Advanced Setup
 
+<details><summary>ManiSkill environment</summary>
+
+```bash
+uv pip install -e ".[maniskill]"
+```
+</details>
+
 <details><summary>Humanoid-bench environment</summary>
 
 ```bash
-conda activate fishrl
 cd third_party && git clone --depth 1 https://github.com/Fisher-Wang/humanoid-bench && cd ..
 uv pip install -e ".[humanoid_bench]" -e third_party/humanoid-bench
 ```
@@ -34,14 +40,13 @@ uv pip install -e ".[humanoid_bench]" -e third_party/humanoid-bench
 <details><summary>IsaacLab 2.3.1 environment</summary>
 
 ```bash
-conda activate fishrl
 cd third_party && git clone --depth 1 --branch v2.3.1 https://github.com/isaac-sim/IsaacLab.git IsaacLab231 && cd ..
 sed -i 's/gymnasium==1\.2\.0/gymnasium/g' third_party/IsaacLab231/source/isaaclab/setup.py
 uv pip install -e ".[isaaclab]" -e "third_party/IsaacLab231/source/isaaclab" -e "third_party/IsaacLab231/source/isaaclab_tasks"
 ```
 </details>
 
-<details><summary>IsaacGym environment</summary>
+<details><summary>IsaacGymEnvs environment</summary>
 
 ```bash
 conda create -n fishrl_gym python=3.8 -y && conda activate fishrl_gym
