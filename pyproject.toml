@@ -14,6 +14,10 @@ dependencies = [
     "tqdm",
     "tyro",
     "wandb",
+
+    # TODO: remove the following dependencies
+    "tensorboard",
+    "moviepy==1.0.3",  # see https://github.com/pytorch/pytorch/issues/147317
 ]
 
 [project.optional-dependencies]

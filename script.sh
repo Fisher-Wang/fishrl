@@ -35,6 +35,13 @@ python ddpg.py --env-id=gym/Hopper-v4
 
 
 ########################
+## DrQv2
+########################
+
+## DMControl Tasks
+python drqv2.py --env-id=dmc/walker-walk-v0
+
+########################
 ## DreamerV1
 ########################
 

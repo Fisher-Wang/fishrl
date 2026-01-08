@@ -80,14 +80,14 @@ python dm3.py --env-id=dmc/walker-walk-v0 --obs-mode=rgb
 For more examples, please refer to [`script.sh`](./script.sh).
 
 ## Algorithms Implemented
-| Algorithm  | File     |
-|------------|----------|
-| [PPO](https://arxiv.org/pdf/1707.06347)        | [`ppo.py`](./ppo.py)     |
-| [DDPG](https://arxiv.org/pdf/1509.02971)       | [`ddpg.py`](./ddpg.py)   |
-| [SAC](https://arxiv.org/pdf/1812.05905)        | [`sac.py`](./sac.py)     |
-| [DrQ v2](https://arxiv.org/pdf/2107.09645)     | [`drqv2.py`](./drqv2.py) |
-| [Dreamer v1](https://arxiv.org/pdf/1912.01603) | [`dm1.py`](./dm1.py)     |
-| [Dreamer v3](https://arxiv.org/pdf/2301.04104) | [`dm3.py`](./dm3.py)     |
+| Algorithm  | File     | Recommended<br>Acceleration Option |
+|------------|----------| ---------------------------------- |
+| [PPO](https://arxiv.org/pdf/1707.06347)        | [`ppo.py`](./ppo.py)     | TODO                    |
+| [DDPG](https://arxiv.org/pdf/1509.02971)       | [`ddpg.py`](./ddpg.py)   | `--compile --cudagraph` |
+| [SAC](https://arxiv.org/pdf/1812.05905)        | [`sac.py`](./sac.py)     | `--compile --cudagraph` |
+| [DrQ v2](https://arxiv.org/pdf/2107.09645)     | [`drqv2.py`](./drqv2.py) | `--compile --cudagraph` |
+| [Dreamer v1](https://arxiv.org/pdf/1912.01603) | [`dm1.py`](./dm1.py)     | TODO                    |
+| [Dreamer v3](https://arxiv.org/pdf/2301.04104) | [`dm3.py`](./dm3.py)     | `--compile --amp`       |
 
 ## Acknowledgments
 
