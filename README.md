@@ -1,6 +1,15 @@
 # 🐟 FishRL
 
-FishRL is a collection of popular deep RL algorithms implemented in PyTorch. It supports various RL environments, supports both state-based and RGB-based observations, for robotics and embodied AI research.
+FishRL is a collection of popular deep reinforcement learning algorithms implemented in PyTorch, designed for robotics and embodied AI research. It supports both state-based and visual (RGB) observations, and provides clean, reference implementations of methods ranging from PPO and SAC to more advanced approaches such as Dreamer v3.
+
+In addition to algorithm implementations, FishRL focuses on the following practical aspects:
+
+- **Unified environment interface.** FishRL supports multiple robotics and embodied AI environments through a unified interface layer. This part is implemented independently of specific algorithms and can be reused to quickly test new algorithms across different simulators with minimal additional engineering.
+
+- **Efficient benchmarking.** To facilitate fair and large-scale benchmarking, all algorithms are implemented with optimized training pipelines and common acceleration techniques. Compared to naïve PyTorch implementations, FishRL typically achieves 3–10× speedup, and is competitive with JAX-based implementations in terms of training throughput.
+
+- **Single-file, readable implementations.** Following the philosophy of [CleanRL](https://github.com/vwxyzjn/cleanrl), FishRL keeps each algorithm in a single, self-contained file whenever possible, while sharing common RL utilities. This design emphasizes readability and ease of modification, making it convenient to understand, debug, and extend the algorithms.
+
 
 ## Installation
 
@@ -58,10 +67,20 @@ python dm3.py --env-id=dmc/walker-walk-v0 --obs-mode=rgb
 
 For more examples, please refer to the [scripts](./scripts).
 
+## Algorithms Implemented
+| Algorithm  | File     |
+|------------|----------|
+| [PPO](https://arxiv.org/pdf/1707.06347)        | ppo.py   |
+| [DDPG](https://arxiv.org/pdf/1509.02971)       | ddpg.py  |
+| [SAC](https://arxiv.org/pdf/1812.05905)        | sac.py   |
+| [DrQ v2](https://arxiv.org/pdf/2107.09645)     | drqv2.py |
+| [Dreamer v1](https://arxiv.org/pdf/1912.01603) | dm1.py   |
+| [Dreamer v3](https://arxiv.org/pdf/2301.04104) | dm3.py   |
+
 ## Acknowledgments
 
 FishRL is inspired by [CleanRL](https://github.com/vwxyzjn/cleanrl) and [SheepRL](https://github.com/Eclectic-Sheep/sheeprl).
 
-Its Dreamerv1 and Dreamerv3 implementation has referred to [NaturalDreamer](https://github.com/InexperiencedMe/NaturalDreamer), [SimpleDreamer](https://github.com/kc-ml2/SimpleDreamer), [SheepRL](https://github.com/Eclectic-Sheep/sheeprl), [dreamerv3-torch](https://github.com/NM512/dreamerv3-torch), and [dreamerv3](https://github.com/danijar/dreamerv3).
+Its Dreamer v1 and Dreamer v3 implementation has referred to [NaturalDreamer](https://github.com/InexperiencedMe/NaturalDreamer), [SimpleDreamer](https://github.com/kc-ml2/SimpleDreamer), [SheepRL](https://github.com/Eclectic-Sheep/sheeprl), [dreamerv3-torch](https://github.com/NM512/dreamerv3-torch), and [dreamerv3](https://github.com/danijar/dreamerv3).
 
 Its acceleration techniques have referred to [LeanRL](https://github.com/meta-pytorch/LeanRL).
