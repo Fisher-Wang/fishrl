@@ -45,7 +45,7 @@ maniskill = [
     "mani_skill==3.0.0b21",
 ]
 isaaclab = [
-    "isaacsim[all,extscache]==5.0.0",
+    "isaacsim[all,extscache]==5.1.0",
 ]
 isaacgym = [
     "isaacgym @ file:${PROJECT_ROOT}/third_party/isaacgym/python",
