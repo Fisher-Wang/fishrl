@@ -431,7 +431,7 @@ class Args:
     compile: bool = False
 
     ## Environment
-    env_id: str = "dm_control/walker-walk-v0"
+    env_id: str = "dmc/walker-walk-v0"
     num_envs: int = 4
 
     ## Training

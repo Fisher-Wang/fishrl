@@ -158,7 +158,7 @@ def compute_lambda_values(
 ########################################################
 @dataclass
 class Args:
-    env_id: str = "dm_control/walker-walk-v0"
+    env_id: str = "dmc/walker-walk-v0"
     exp_name: str = "dreamerv1"
     num_envs: int = 1
     seed: int = 0

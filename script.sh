@@ -3,7 +3,7 @@
 ########################
 
 ## DMControl Tasks
-python ppo.py --env-id=dm_control/cartpole-balance-v0 --seed 2 --num-envs=4 --lr=1e-3 --num_steps=2048 --total_timesteps=1000000
+python ppo.py --env-id=dmc/cartpole-balance-v0 --seed 2 --num-envs=4 --lr=1e-3 --num_steps=2048 --total_timesteps=1000000
 
 ## Humanoid-bench Tasks
 python ppo.py --env-id=humanoid_bench/h1hand-reach-v0 --num-envs=4 --num-steps=1000
@@ -39,7 +39,7 @@ python ddpg.py --env-id=gym/Hopper-v4
 ########################
 
 ## DMControl Tasks
-python dm1.py --env-id dm_control/walker-walk-v0
+python dm1.py --env-id dmc/walker-walk-v0
 
 
 ########################
@@ -47,4 +47,4 @@ python dm1.py --env-id dm_control/walker-walk-v0
 ########################
 
 ## DMControl Tasks
-python dm3.py --env-id dm_control/walker-walk-v0
+python dm3.py --env-id dmc/walker-walk-v0

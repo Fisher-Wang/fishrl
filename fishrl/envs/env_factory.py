@@ -38,12 +38,12 @@ def create_vector_env(
     Returns:
         Vectorized environment
     """
-    if env_id.startswith("dm_control/"):
+    if env_id.startswith("dmc/"):
         from .dmc_env import DMControlEnv
 
         env_fns = [
             lambda: DMControlEnv(
-                env_id.replace("dm_control/", ""),
+                env_id.replace("dmc/", ""),
                 seed + i * SEED_SPACING,
                 image_size,
                 obs_mode,

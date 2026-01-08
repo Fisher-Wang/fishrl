@@ -58,7 +58,7 @@ def seed_everything(seed):
 ########################################################
 @dataclass
 class Args:
-    env_id: str = "dm_control/cartpole-balance-v0"
+    env_id: str = "dmc/cartpole-balance-v0"
     exp_name: str = "ppo"
     seed: int = 0
     num_envs: int = 1
