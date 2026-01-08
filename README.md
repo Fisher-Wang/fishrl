@@ -1,46 +1,39 @@
 # 🐟 FishRL
 
+FishRL is a collection of popular deep RL algorithms implemented in PyTorch. It supports various RL environments, supports both state-based and RGB-based observations, for robotics and embodied AI research.
+
 ## Installation
 
-Main environment (Including DM-Control, ManiSkill):
+### Recommended Setup
 ```bash
 conda create -n fishrl python=3.11 -y && conda activate fishrl
-uv pip install -e ".[dmc,maniskill]"
+uv pip install -e ".[dmc,benchmark]"
 ```
+The `benchmark` option specifies the packages version for the reproducibility of benchmarking results.
 
-RoboVerse environment:
-```bash
-conda create -n fishrl_rv python=3.11 -y && conda activate fishrl_rv
-cd third_party
-git clone https://github.com/RoboVerseOrg/RoboVerse && cd RoboVerse
-git checkout 8952c9a  # ensure compatibility
-uv pip install -e ".[mjx]" "jax[cuda]==0.6.2"
-cd ../..
-uv pip install -e .
-```
+### Advanced Setup
 
-Humanoid-bench environment:
+<details><summary>Humanoid-bench environment</summary>
+
 ```bash
 conda activate fishrl
 cd third_party && git clone --depth 1 https://github.com/Fisher-Wang/humanoid-bench && cd ..
-uv pip install -e ".[dmc,maniskill,humanoid_bench]" -e third_party/humanoid-bench
+uv pip install -e ".[humanoid_bench]" -e third_party/humanoid-bench
 ```
+</details>
 
-IsaacLab 2.2.0 environment:
+<details><summary>IsaacLab 2.3.1 environment</summary>
+
 ```bash
 conda activate fishrl
-cd third_party && git clone --depth 1 --branch v2.2.0 https://github.com/isaac-sim/IsaacLab.git IsaacLab220 && cd ..
-sed -i 's/gymnasium==1\.2\.0/gymnasium/g' third_party/IsaacLab220/source/isaaclab/setup.py
-uv pip install -e ".[dmc,maniskill,humanoid_bench,isaaclab]" -e "third_party/IsaacLab220/source/isaaclab" -e "third_party/IsaacLab220/source/isaaclab_tasks"
+cd third_party && git clone --depth 1 --branch v2.3.1 https://github.com/isaac-sim/IsaacLab.git IsaacLab231 && cd ..
+sed -i 's/gymnasium==1\.2\.0/gymnasium/g' third_party/IsaacLab231/source/isaaclab/setup.py
+uv pip install -e ".[isaaclab]" -e "third_party/IsaacLab231/source/isaaclab" -e "third_party/IsaacLab231/source/isaaclab_tasks"
 ```
+</details>
 
-Gymnasium-robotics environment:
-```bash
-conda create -n fishrl_gr python=3.11 -y && conda activate fishrl_gr
-uv pip install -e ".[gymnasium_robotics]"
-```
+<details><summary>IsaacGym environment</summary>
 
-IsaacGym environment:
 ```bash
 conda create -n fishrl_gym python=3.8 -y && conda activate fishrl_gym
 cd third_party
@@ -54,18 +47,21 @@ uv pip install -e .
 cd ../..
 uv pip install networkx==2.1
 ```
+</details>
 
-IsaacLab 2.1.1 environment:
+## Get Started
+
+To run the Dreamerv3 agent on the DMControl Walker-walk task with rgb observation, you can use the following command:
 ```bash
-conda create -n fishrl_lab python=3.10 -y && conda activate fishrl_lab
-uv pip install -e ".[isaaclab]"
-cd third_party
-git clone --depth 1 --branch v2.1.0 https://github.com/isaac-sim/IsaacLab.git IsaacLab210 && cd IsaacLab210
-sed -i '/^EXTRAS_REQUIRE = {/,/^}$/c\EXTRAS_REQUIRE = {\n    "sb3": [],\n    "skrl": [],\n    "rl-games": [],\n    "rsl-rl": [],\n}' source/isaaclab_rl/setup.py
-sed -i 's/if platform\.system() == "Linux":/if False:/' source/isaaclab_mimic/setup.py
-./isaaclab.sh -i
-cd ../..
+python dm3.py --env-id=dmc/walker-walk-v0 --obs-mode=rgb
 ```
 
-## Usage
-see [script.sh](./script.sh)
+For more examples, please refer to the [scripts](./scripts).
+
+## Acknowledgments
+
+FishRL is inspired by [CleanRL](https://github.com/vwxyzjn/cleanrl) and [SheepRL](https://github.com/Eclectic-Sheep/sheeprl).
+
+Its Dreamerv1 and Dreamerv3 implementation has referred to [NaturalDreamer](https://github.com/InexperiencedMe/NaturalDreamer), [SimpleDreamer](https://github.com/kc-ml2/SimpleDreamer), [SheepRL](https://github.com/Eclectic-Sheep/sheeprl), [dreamerv3-torch](https://github.com/NM512/dreamerv3-torch), and [dreamerv3](https://github.com/danijar/dreamerv3).
+
+Its acceleration techniques have referred to [LeanRL](https://github.com/meta-pytorch/LeanRL).
