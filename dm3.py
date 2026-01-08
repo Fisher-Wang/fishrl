@@ -1,27 +1,19 @@
 from __future__ import annotations
 
-try:
-    import isaacgym  # noqa: F401
-except ImportError:
-    pass
-
 import os
-from dataclasses import dataclass
+import warnings
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from itertools import chain
-from typing import Any, Callable, Literal, Sequence
-
-os.environ["MUJOCO_GL"] = "egl"  # significantly faster rendering compared to glfw and osmesa
+from typing import Any, Callable, Literal
 
 import gymnasium as gym
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import tyro
-from loguru import logger as log
-from rich.logging import RichHandler
-from torch import Tensor
+from tensordict import TensorDict, from_module
+from tensordict.nn import CudaGraphModule
+from torch import Tensor, nn
 from torch.distributions import (
     Bernoulli,
     Distribution,
@@ -31,38 +23,63 @@ from torch.distributions import (
     kl_divergence,
 )
 from torch.distributions.utils import probs_to_logits
-from torch.utils.tensorboard.writer import SummaryWriter
-from torchmetrics import MeanMetric
-from tqdm import tqdm
+from torchvision.utils import make_grid
+from tqdm.rich import tqdm
 
-from fishrl.envs.env_factory import create_vector_env
+from fishrl.envs import BaseVecEnv, create_vector_env
+from fishrl.utils.logger import JsonlOutput, Logger, TensorboardOutput, WandbOutput
 from fishrl.utils.metrics import MetricAggregator
 from fishrl.utils.reproducibility import enable_deterministic_run, seed_everything
 from fishrl.utils.timer import timer
 from fishrl.utils.utils import Ratio
+from fishrl.wrapper import UnwrapDictWrapper
 
-log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
+
+class ObsShiftWrapper(gym.Wrapper):
+    env: BaseVecEnv
+
+    # change observation space from [0, 1] to [-0.5, 0.5]
+    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
+        obs, info = self.env.reset(seed=seed, options=options)
+        obs = obs - 0.5
+        return obs, info
+
+    def step(self, action: np.ndarray):
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs = obs - 0.5
+        return obs, reward, terminated, truncated, info
 
 
 ########################################################
 ## Standalone utils
 ########################################################
-class ObsShiftWrapper(gym.Wrapper):
-    # change observation space from [0, 1] to [-0.5, 0.5]
-    # TODO: also change observation space
-    def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
-        obs, info = self.env.reset(seed=seed, options=options)
-        return obs - 0.5, info
-
-    def step(self, action: np.ndarray):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        return obs - 0.5, reward, terminated, truncated, info
+def make_logger(
+    output_names: list[Literal["wandb", "tensorboard", "jsonl"]],
+    logdir: str,
+    config: dict[str, Any],
+    init_step: int = 0,
+    wandb_entity: str | None = None,
+    wandb_project: str = "fishrl",
+) -> Logger:
+    run_name = logdir.split("/")[-1]
+    domain_name = logdir.split("/")[-2]
+    outputs = []
+    for output in output_names:
+        if output == "wandb":
+            wandb_kargs = dict(dir=logdir, project=wandb_project, config=config, entity=wandb_entity)
+            outputs.append(WandbOutput(name=f"{domain_name}/{run_name}", **wandb_kargs))
+        elif output == "tensorboard":
+            outputs.append(TensorboardOutput(logdir=logdir, config=config))
+        elif output == "jsonl":
+            outputs.append(JsonlOutput(logdir=logdir, filename="metrics.jsonl"))
+    logger = Logger(outputs, init_step=init_step)
+    return logger
 
 
 class ReplayBuffer:
     def __init__(
         self,
-        observation_shape: Sequence[int],
+        observation_shape: tuple[int] | dict,
         action_size: int,
         device: str | torch.device,
         num_envs: int = 1,
@@ -72,10 +89,8 @@ class ReplayBuffer:
         self.num_envs = num_envs
         self.capacity = capacity
 
-        state_type = np.uint8 if len(observation_shape) < 3 else np.float32
-
-        self.observation = np.empty((self.capacity, self.num_envs, *observation_shape), dtype=state_type)
-        self.next_observation = np.empty((self.capacity, self.num_envs, *observation_shape), dtype=state_type)
+        self.observation = self.build_observation_buffer_recursively(observation_shape)
+        self.next_observation = self.build_observation_buffer_recursively(observation_shape)
         self.action = np.empty((self.capacity, self.num_envs, action_size), dtype=np.float32)
         self.reward = np.empty((self.capacity, self.num_envs, 1), dtype=np.float32)
         self.done = np.empty((self.capacity, self.num_envs, 1), dtype=np.float32)
@@ -87,6 +102,15 @@ class ReplayBuffer:
     def __len__(self):
         return self.capacity if self.full else self.buffer_index
 
+    def build_observation_buffer_recursively(self, observation_shape: tuple[int] | dict) -> np.ndarray | dict:
+        if isinstance(observation_shape, tuple):
+            return np.empty((self.capacity, self.num_envs, *observation_shape), dtype=np.float32)
+        elif isinstance(observation_shape, dict):
+            return {
+                key: self.build_observation_buffer_recursively(observation_shape[key])
+                for key in observation_shape.keys()
+            }
+
     def add(
         self,
         observation: Tensor,
@@ -97,9 +121,9 @@ class ReplayBuffer:
         terminated: Tensor,
     ):
         self.observation[self.buffer_index] = observation.detach().cpu().numpy()
+        self.next_observation[self.buffer_index] = next_observation.detach().cpu().numpy()
         self.action[self.buffer_index] = action.detach().cpu().numpy()
         self.reward[self.buffer_index] = reward.unsqueeze(-1).detach().cpu().numpy()
-        self.next_observation[self.buffer_index] = next_observation.detach().cpu().numpy()
         self.done[self.buffer_index] = done.unsqueeze(-1).detach().cpu().numpy()
         self.terminated[self.buffer_index] = terminated.unsqueeze(-1).detach().cpu().numpy()
 
@@ -132,14 +156,16 @@ class ReplayBuffer:
         done = torch.as_tensor(flatten(self.done)[flattened_index], device=self.device)
         terminated = torch.as_tensor(flatten(self.terminated)[flattened_index], device=self.device)
 
-        sample = {
-            "observation": observation,
-            "action": action,
-            "reward": reward,
-            "next_observation": next_observation,
-            "done": done,
-            "terminated": terminated,
-        }
+        sample = TensorDict(
+            obs=observation,
+            action=action,
+            reward=reward,
+            next_obs=next_observation,
+            done=done,
+            terminated=terminated,
+            batch_size=action.shape[0],
+            device=self.device,
+        )
         return sample
 
 
@@ -413,77 +439,6 @@ class Moments(nn.Module):
         return self.low.detach(), invscale.detach()
 
 
-########################################################
-## Args
-########################################################
-@dataclass
-class Args:
-    exp_name: str = "dreamerv3"
-    seed: int = 0
-    device: str = "cuda"
-    debug: bool = False
-    log_every: int = 500
-    eval_every: int = 2000
-    checkpoint_every: int = 10_000
-    eval_episodes: int = 8
-    amp: bool = False
-    deterministic: bool = False
-    compile: bool = False
-
-    ## Environment
-    env_id: str = "dmc/walker-walk-v0"
-    num_envs: int = 4
-
-    ## Training
-    batch_size: int = 16
-    batch_length: int = 64
-    horizon: int = 15
-    total_steps: int = 500000
-    prefill: int = 1000
-
-    ## All models
-    bins: int = 255
-
-    ## World Model
-    model_lr: float = 1e-4
-    model_eps: float = 1e-8
-    model_clip: float = 1000.0
-    free_nats: float = 1.0
-    stochastic_length: int = 32
-    stochastic_classes: int = 32
-    deterministic_size: int = 512
-    embedded_obs_size: int = 4096  # = 256 * 4 * 4
-
-    ## Actor Critic
-    actor_grad: Literal["dynamics", "reinforce"] = "dynamics"
-    actor_lr: float = 8e-5
-    actor_eps: float = 1e-5
-    actor_clip: float = 100.0
-    actor_ent_coef: float = 0.0003
-    critic_lr: float = 8e-5
-    critic_eps: float = 1e-5
-    critic_clip: float = 100.0
-    gae_lambda: float = 0.95
-    gamma: float = 0.997
-
-    @property
-    def stochastic_size(self):
-        return self.stochastic_length * self.stochastic_classes
-
-    def __post_init__(self):
-        if self.debug:
-            self.batch_size = 2
-            self.batch_length = 3
-            self.prefill = self.num_envs * self.batch_size * self.batch_length
-            self.train_per_rollout = 1
-
-
-args = tyro.cli(Args)
-
-
-########################################################
-## Networks
-########################################################
 # Adapted from: https://github.com/NM512/dreamerv3-torch/blob/main/tools.py#L929
 def init_weights(m):
     if isinstance(m, nn.Linear):
@@ -531,8 +486,58 @@ def uniform_init_weights(given_scale):
     return f
 
 
+########################################################
+## Configs
+########################################################
+@dataclass
+class Dm3Cfg:
+    ratio: float = 0.5
+    batch_size: int = 16
+    chunk_size: int = 64
+
+    ## Training
+    batch_length: int = 64
+    horizon: int = 15
+    bins: int = 255
+
+    ## World Model
+    model_lr: float = 1e-4
+    model_eps: float = 1e-8
+    model_clip: float = 1000.0
+    free_nats: float = 1.0
+    stochastic_length: int = 32
+    stochastic_classes: int = 32
+    deterministic_size: int = 512
+    embedded_obs_size: int = 4096
+
+    ## Actor Critic
+    actor_grad: Literal["dynamics", "reinforce"] = "dynamics"
+    actor_lr: float = 8e-5
+    actor_eps: float = 1e-5
+    actor_clip: float = 100.0
+    actor_ent_coef: float = 0.0003
+    critic_lr: float = 8e-5
+    critic_eps: float = 1e-5
+    critic_clip: float = 100.0
+    critic_tau: float = 0.02
+    ac_batch_size: int = -1  # if -1, ac_batch_size = batch_size * batch_length
+    gae_lambda: float = 0.95
+    gamma: float = 0.997
+
+    @property
+    def stochastic_size(self):
+        return self.stochastic_length * self.stochastic_classes
+
+    def __post_init__(self):
+        if self.ac_batch_size == -1:
+            self.ac_batch_size = self.batch_size * self.batch_length
+
+
+########################################################
+## Networks
+########################################################
 class Encoder(nn.Module):
-    ## HACK: the output size is 4096, which should be equal to args.embedded_obs_size
+    ## HACK: the output size is 4096, which should be equal to embedded_obs_size
     def __init__(self):
         super().__init__()
         self.encoder = nn.Sequential(
@@ -558,10 +563,10 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: Dm3Cfg):
         super().__init__()
         self.decoder = nn.Sequential(
-            nn.Linear(args.deterministic_size + args.stochastic_size, 4096),
+            nn.Linear(cfg.deterministic_size + cfg.stochastic_size, 4096),
             nn.Unflatten(1, (256, 4, 4)),
             nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1, bias=False),
             LayerNormChannelLast(128, eps=1e-3),
@@ -587,15 +592,15 @@ class Decoder(nn.Module):
 
 
 class RecurrentModel(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, cfg: Dm3Cfg, envs):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(args.stochastic_size + envs.single_action_space.shape[0], 512, bias=False),
+            nn.Linear(cfg.stochastic_size + envs.single_action_space.shape[0], 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
         )
         self.recurrent = LayerNormGRUCell(
-            512, args.deterministic_size, bias=False, layer_norm_cls=nn.LayerNorm, layer_norm_kw={"eps": 1e-3}
+            512, cfg.deterministic_size, bias=False, layer_norm_cls=nn.LayerNorm, layer_norm_kw={"eps": 1e-3}
         )
         self.mlp.apply(init_weights)
         self.recurrent.apply(init_weights)
@@ -607,64 +612,66 @@ class RecurrentModel(nn.Module):
         return x
 
 
-def _unimix(logits: Tensor) -> Tensor:
+def _unimix(logits: Tensor, num_classes: int) -> Tensor:
     probs = logits.softmax(dim=-1)
-    uniform = torch.ones_like(probs) / args.stochastic_classes
+    uniform = torch.ones_like(probs) / num_classes
     probs = 0.99 * probs + 0.01 * uniform
     logits = probs_to_logits(probs)
     return logits
 
 
 class TransitionModel(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: Dm3Cfg):
         super().__init__()
+        self.cfg = cfg
         self.net = nn.Sequential(
-            nn.Linear(args.deterministic_size, 512, bias=False),
+            nn.Linear(cfg.deterministic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
-            nn.Linear(512, args.stochastic_size),
+            nn.Linear(512, cfg.stochastic_size),
         )
         [m.apply(init_weights) for m in self.net[:-1]]
         self.net[-1].apply(uniform_init_weights(1.0))
 
     def forward(self, deterministic: Tensor) -> tuple[Distribution, Tensor]:
-        logits = self.net(deterministic).view(-1, args.stochastic_length, args.stochastic_classes)
-        logits = _unimix(logits)
+        logits = self.net(deterministic).view(-1, self.cfg.stochastic_length, self.cfg.stochastic_classes)
+        logits = _unimix(logits, self.cfg.stochastic_classes)
         dist = Independent(OneHotCategoricalStraightThrough(logits=logits), 1)
-        return dist, logits.view(-1, args.stochastic_size)
+        return dist, logits.view(-1, self.cfg.stochastic_size)
 
 
 class RepresentationModel(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: Dm3Cfg):
         super().__init__()
+        self.cfg = cfg
         self.net = nn.Sequential(
-            nn.Linear(args.embedded_obs_size + args.deterministic_size, 512, bias=False),
+            nn.Linear(cfg.embedded_obs_size + cfg.deterministic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
-            nn.Linear(512, args.stochastic_size),
+            nn.Linear(512, cfg.stochastic_size),
         )
         [m.apply(init_weights) for m in self.net[:-1]]
         self.net[-1].apply(uniform_init_weights(1.0))
 
     def forward(self, embedded_obs: Tensor, deterministic: Tensor) -> tuple[Distribution, Tensor]:
         x = torch.cat([embedded_obs, deterministic], dim=1)
-        logits = self.net(x).view(-1, args.stochastic_length, args.stochastic_classes)
-        logits = _unimix(logits)
+        logits = self.net(x).view(-1, self.cfg.stochastic_length, self.cfg.stochastic_classes)
+        logits = _unimix(logits, self.cfg.stochastic_classes)
         dist = Independent(OneHotCategoricalStraightThrough(logits=logits), 1)
-        return dist, logits.view(-1, args.stochastic_size)
+        return dist, logits.view(-1, self.cfg.stochastic_size)
 
 
 class RewardPredictor(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: Dm3Cfg):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(args.deterministic_size + args.stochastic_size, 512, bias=False),
+            nn.Linear(cfg.deterministic_size + cfg.stochastic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
             nn.Linear(512, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
-            nn.Linear(512, args.bins),
+            nn.Linear(512, cfg.bins),
         )
         [m.apply(init_weights) for m in self.net[:-1]]
         self.net[-1].apply(uniform_init_weights(0.0))
@@ -680,10 +687,10 @@ class RewardPredictor(nn.Module):
 
 
 class ContinueModel(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: Dm3Cfg):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(args.deterministic_size + args.stochastic_size, 512, bias=False),
+            nn.Linear(cfg.deterministic_size + cfg.stochastic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
             nn.Linear(512, 512, bias=False),
@@ -704,10 +711,10 @@ class ContinueModel(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, envs):
+    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv):
         super().__init__()
         self.actor = nn.Sequential(
-            nn.Linear(args.deterministic_size + args.stochastic_size, 512, bias=False),
+            nn.Linear(cfg.deterministic_size + cfg.stochastic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
             nn.Linear(512, 512, bias=False),
@@ -729,16 +736,16 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
-    def __init__(self):
+    def __init__(self, cfg: Dm3Cfg):
         super().__init__()
         self.critic = nn.Sequential(
-            nn.Linear(args.stochastic_size + args.deterministic_size, 512, bias=False),
+            nn.Linear(cfg.stochastic_size + cfg.deterministic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
             nn.Linear(512, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
-            nn.Linear(512, args.bins),
+            nn.Linear(512, cfg.bins),
         )
         [m.apply(init_weights) for m in self.critic[:-1]]
         self.critic[-1].apply(uniform_init_weights(0.0))
@@ -750,416 +757,526 @@ class Critic(nn.Module):
 
 
 ########################################################
-## Main
+## Agent
 ########################################################
+class Dm3Agent:
+    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv, device: torch.device, amp: bool = False):
+        self.cfg = cfg
+        self.device = device
+        self.num_envs = envs.num_envs
+        self.amp = amp
+        self.use_kl_curiosity = False
 
-## setup
-device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-log.info(f"Using device: {device}" + (f" (GPU {torch.cuda.current_device()})" if torch.cuda.is_available() else ""))
-seed_everything(args.seed)
-if args.deterministic:
-    enable_deterministic_run()
+        self.encoder = Encoder().to(device)
+        self.decoder = Decoder(cfg).to(device)
+        self.recurrent_model = RecurrentModel(cfg, envs).to(device)
+        self.transition_model = TransitionModel(cfg).to(device)
+        self.representation_model = RepresentationModel(cfg).to(device)
+        self.reward_predictor = RewardPredictor(cfg).to(device)
+        self.continue_model = ContinueModel(cfg).to(device)
+        self.actor = Actor(cfg, envs).to(device)
+        self.critic = Critic(cfg).to(device)
+        self.target_critic = Critic(cfg).to(device)
+        self.critic_params = from_module(self.critic).data
+        self.target_critic_params = from_module(self.target_critic).data
+        self.moments = Moments().to(device)
 
-## logger
-_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-run_name = f"{args.env_id}__{args.exp_name}__env={args.num_envs}__seed={args.seed}__{_timestamp}"
-logdir = f"logdir/{run_name}"
-os.makedirs(logdir, exist_ok=True)
-writer = SummaryWriter(logdir)
-writer.add_text(
-    "hyperparameters",
-    "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
-)
-
-## env and replay buffer
-envs = create_vector_env(args.env_id, "rgb", args.num_envs, args.seed, action_repeat=2, image_size=(64, 64))
-envs = ObsShiftWrapper(envs)
-buffer = ReplayBuffer(
-    envs.single_observation_space.shape,
-    envs.single_action_space.shape[0],
-    device,
-    num_envs=args.num_envs,
-    capacity=500_000,
-)
-
-## networks
-encoder = Encoder().to(device)
-decoder = Decoder().to(device)
-recurrent_model = RecurrentModel(envs).to(device)
-transition_model = TransitionModel().to(device)
-representation_model = RepresentationModel().to(device)
-reward_predictor = RewardPredictor().to(device)
-continue_model = ContinueModel().to(device)
-actor = Actor(envs).to(device)
-critic = Critic().to(device)
-moments = Moments().to(device)
-if args.compile:
-    encoder = torch.compile(encoder)
-    decoder = torch.compile(decoder)
-    recurrent_model = torch.compile(recurrent_model)
-    transition_model = torch.compile(transition_model)
-    representation_model = torch.compile(representation_model)
-    reward_predictor = torch.compile(reward_predictor)
-    continue_model = torch.compile(continue_model)
-    actor = torch.compile(actor)
-    critic = torch.compile(critic)
-    moments = torch.compile(moments)
-
-model_params = chain(
-    encoder.parameters(),
-    decoder.parameters(),
-    recurrent_model.parameters(),
-    transition_model.parameters(),
-    representation_model.parameters(),
-    reward_predictor.parameters(),
-    continue_model.parameters(),
-)
-model_optimizer = torch.optim.Adam(model_params, lr=args.model_lr, eps=args.model_eps)
-actor_optimizer = torch.optim.Adam(actor.parameters(), lr=args.actor_lr, eps=args.actor_eps)
-critic_optimizer = torch.optim.Adam(critic.parameters(), lr=args.critic_lr, eps=args.critic_eps)
-model_scaler = torch.amp.GradScaler(enabled=args.amp)
-actor_scaler = torch.amp.GradScaler(enabled=args.amp)
-critic_scaler = torch.amp.GradScaler(enabled=args.amp)
-
-
-## logging
-global_step = 0
-ratio = Ratio(ratio=0.5)
-aggregator = MetricAggregator({
-    "loss/reconstruction_loss": MeanMetric(sync_on_compute=False),
-    "loss/reward_loss": MeanMetric(sync_on_compute=False),
-    "loss/continue_loss": MeanMetric(sync_on_compute=False),
-    "loss/kl_loss": MeanMetric(sync_on_compute=False),
-    "loss/model_loss": MeanMetric(sync_on_compute=False),
-    "loss/actor_loss": MeanMetric(sync_on_compute=False),
-    "loss/value_loss": MeanMetric(sync_on_compute=False),
-    "state/kl": MeanMetric(sync_on_compute=False),
-    "state/prior_entropy": MeanMetric(sync_on_compute=False),
-    "state/posterior_entropy": MeanMetric(sync_on_compute=False),
-    "state/actor_entropy": MeanMetric(sync_on_compute=False),
-    "grad_norm/model": MeanMetric(sync_on_compute=False),
-    "grad_norm/actor": MeanMetric(sync_on_compute=False),
-    "grad_norm/critic": MeanMetric(sync_on_compute=False),
-})
-
-
-def dynamic_learning(data: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
-    # TODO: utilize "next_observation" to update the model
-    # TODO: since the replay buffer may contain termination/truncation in the middle of a rollout, we need to handle this case by resetting posterior, deterministic, and action to initial state (zero)
-
-    # Given the following diagram, with batch_length=4
-    # Actions:           [a'0]    [a'1]    [a'2]    a'3  <-- input
-    #                       \        \        \
-    #                        \        \        \
-    #                         \        \        \
-    # States:          0  ->  z'1  ->  z'2  ->  z'3      <-- output
-    # Observations:   o'0    [o'1]    [o'2]    [o'3]     <-- input
-    # Rewards:                r'1      r'2      r'3      <-- output
-    # Continues:              c'1      c'2      c'3      <-- output
-
-    with torch.autocast(args.device, enabled=args.amp):
-        posterior = torch.zeros(args.batch_size, args.stochastic_size, device=device)
-        deterministic = torch.zeros(args.batch_size, args.deterministic_size, device=device)
-        embeded_obs = encoder(data["observation"].flatten(0, 1)).unflatten(0, (args.batch_size, args.batch_length))
-
-        deterministics = []
-        priors_logits = []
-        posteriors = []
-        posteriors_logits = []
-        for t in range(1, args.batch_length):
-            deterministic = recurrent_model(posterior, data["action"][:, t - 1], deterministic)
-            prior_dist, prior_logits = transition_model(deterministic)
-            posterior_dist, posterior_logits = representation_model(embeded_obs[:, t], deterministic)
-            posterior = posterior_dist.rsample().view(-1, args.stochastic_size)
-
-            deterministics.append(deterministic)
-            priors_logits.append(prior_logits)
-            posteriors.append(posterior)
-            posteriors_logits.append(posterior_logits)
-
-        deterministics = torch.stack(deterministics, dim=1).to(device)
-        prior_logits = torch.stack(priors_logits, dim=1).to(device)
-        posteriors = torch.stack(posteriors, dim=1).to(device)
-        posteriors_logits = torch.stack(posteriors_logits, dim=1).to(device)
-
-        reconstructed_obs = decoder(posteriors, deterministics)
-        reconstructed_obs_dist = MSEDistribution(
-            reconstructed_obs, 3
-        )  # 3 is number of dimensions for observation space, shape is (3, H, W)
-        reconstructed_obs_loss = -reconstructed_obs_dist.log_prob(data["observation"][:, 1:]).mean()
-
-        predicted_reward_bins = reward_predictor(posteriors, deterministics)
-        predicted_reward_dist = TwoHotEncodingDistribution(predicted_reward_bins, dims=1)
-        reward_loss = -predicted_reward_dist.log_prob(data["reward"][:, 1:]).mean()
-
-        predicted_continue = continue_model(posteriors, deterministics)
-        predicted_continue_dist = SafeBernoulli(logits=predicted_continue)
-        true_continue = 1 - data["terminated"][:, 1:]
-        continue_loss = -predicted_continue_dist.log_prob(true_continue).mean()
-
-        # KL balancing, Eq. 3 in the paper
-        kl = kl_loss1 = kl_divergence(
-            Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
-            Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 1),
+        self.model_params = (
+            list(self.encoder.parameters())
+            + list(self.decoder.parameters())
+            + list(self.recurrent_model.parameters())
+            + list(self.transition_model.parameters())
+            + list(self.representation_model.parameters())
+            + list(self.reward_predictor.parameters())
+            + list(self.continue_model.parameters())
         )
-        kl_loss1 = torch.max(kl_loss1, torch.tensor(args.free_nats, device=device))
-        kl_loss2 = kl_divergence(
-            Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits), 1),
-            Independent(OneHotCategoricalStraightThrough(logits=prior_logits.detach()), 1),
-        )
-        kl_loss2 = torch.max(kl_loss2, torch.tensor(args.free_nats, device=device))
-        kl_loss = (0.5 * kl_loss1 + 0.1 * kl_loss2).mean()
+        self.model_optimizer = torch.optim.Adam(self.model_params, lr=cfg.model_lr, eps=cfg.model_eps)
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.actor_lr, eps=cfg.actor_eps)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.critic_lr, eps=cfg.critic_eps)
+        self.model_scaler = torch.amp.GradScaler(enabled=amp)
+        self.actor_scaler = torch.amp.GradScaler(enabled=amp)
+        self.critic_scaler = torch.amp.GradScaler(enabled=amp)
 
-        model_loss = reconstructed_obs_loss + reward_loss + continue_loss + kl_loss
+    def get_action(self, data: TensorDict, explore: bool = False) -> Tensor:
+        if explore:
+            action = self.actor(data["posterior"], data["deterministic"]).sample()
+        else:
+            action = self.actor(data["posterior"], data["deterministic"]).mode
+        return action
 
-    model_optimizer.zero_grad()
-    model_scaler.scale(model_loss).backward()
-    model_scaler.unscale_(model_optimizer)
-    model_grad_norm = nn.utils.clip_grad_norm_(model_params, args.model_clip)
-    model_scaler.step(model_optimizer)
-    model_scaler.update()
+    def dynamic_learning(self, data: TensorDict) -> tuple[TensorDict, Tensor, Tensor]:
+        # TODO: utilize "next_obs" to update the model
+        # TODO: since the replay buffer may contain termination/truncation in the middle of a rollout, we need to handle this case by resetting posterior, deterministic, and action to initial state (zero)
 
-    with torch.no_grad():
-        aggregator.update("loss/reconstruction_loss", reconstructed_obs_loss.item())
-        aggregator.update("loss/reward_loss", reward_loss.item())
-        aggregator.update("loss/continue_loss", continue_loss.item())
-        aggregator.update("loss/kl_loss", kl_loss.item())
-        aggregator.update("loss/model_loss", model_loss.item())
-        aggregator.update("state/kl", kl.mean().item())
-        aggregator.update("state/prior_entropy", prior_dist.entropy().mean().item())
-        aggregator.update("state/posterior_entropy", posterior_dist.entropy().mean().item())
-        aggregator.update("grad_norm/model", model_grad_norm.mean().item())
+        # Given the following diagram, with batch_length=4
+        # Actions:           [a'0]    [a'1]    [a'2]    a'3  <-- input
+        #                       \        \        \
+        #                        \        \        \
+        #                         \        \        \
+        # States:          0  ->  z'1  ->  z'2  ->  z'3      <-- output
+        # Observations:   o'0    [o'1]    [o'2]    [o'3]     <-- input
+        # Rewards:                r'1      r'2      r'3      <-- output
+        # Continues:              c'1      c'2      c'3      <-- output
 
-    return posteriors, deterministics
+        cfg = self.cfg
 
+        with torch.autocast(self.device.type, enabled=self.amp):
+            posterior = torch.zeros(cfg.batch_size, cfg.stochastic_size, device=self.device)
+            deterministic = torch.zeros(cfg.batch_size, cfg.deterministic_size, device=self.device)
+            embeded_obs = self.encoder(data["obs"].flatten(0, 1)).unflatten(0, (cfg.batch_size, cfg.batch_length))
 
-def behavior_learning(posteriors_: Tensor, deterministics_: Tensor):
-    ## reuse the `posteriors` and `deterministics` from model learning, important to detach them!
-    state = posteriors_.detach().view(-1, args.stochastic_size)
-    deterministic = deterministics_.detach().view(-1, args.deterministic_size)
+            deterministics = []
+            priors_logits = []
+            posteriors = []
+            posteriors_logits = []
+            for t in range(1, cfg.batch_length):
+                deterministic = self.recurrent_model(posterior, data["action"][:, t - 1], deterministic)
+                prior_dist, prior_logits = self.transition_model(deterministic)
+                posterior_dist, posterior_logits = self.representation_model(embeded_obs[:, t], deterministic)
+                posterior = posterior_dist.rsample().view(-1, cfg.stochastic_size)
 
-    # Given the following diagram, with horizon=4
-    # Actions:            a'0      a'1      a'2       a'3
-    #                    ^  \     ^  \     ^  \      ^  \
-    #                   /    \   /    \   /    \    /    \
-    #                  /      \ /      \ /      \  /      \
-    # States:        z'0  ->  z'1  ->  z'2  ->  z'3  ->  z'4    <-- input is z'0, output is z'1~z'4
-    # Rewards:                r'1      r'2      r'3      r'4    <-- output
-    # Continues:              c'1      c'2      c'3      c'4    <-- output
-    # Values:                 v'1      v'2      v'3      v'4    <-- output
-    # Lambda-values:          l'1      l'2      l'3             <-- output
+                deterministics.append(deterministic)
+                priors_logits.append(prior_logits)
+                posteriors.append(posterior)
+                posteriors_logits.append(posterior_logits)
 
-    with torch.autocast(args.device, enabled=args.amp):
-        actions = []
-        states = []
-        deterministics = []
-        for t in range(args.horizon):
-            action = actor(state.detach(), deterministic.detach()).rsample()  # detach help speed up about 10%
-            deterministic = recurrent_model(state, action, deterministic)
-            state_dist, state_logits = transition_model(deterministic)
-            state = state_dist.rsample().view(-1, args.stochastic_size)
-            actions.append(action)
-            states.append(state)
-            deterministics.append(deterministic)
+            deterministics = torch.stack(deterministics, dim=1).to(self.device)
+            prior_logits = torch.stack(priors_logits, dim=1).to(self.device)
+            posteriors = torch.stack(posteriors, dim=1).to(self.device)
+            posteriors_logits = torch.stack(posteriors_logits, dim=1).to(self.device)
 
-        actions = torch.stack(actions, dim=1)
-        states = torch.stack(states, dim=1)
-        deterministics = torch.stack(deterministics, dim=1)
+            if self.use_kl_curiosity:
+                # calculate real kl curio reward with the wm itself
+                # TODO: check if this reward is really correct
+                kl_reward1 = kl_divergence(
+                    Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 0),
+                    Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 0),
+                )
+                kl_reward2 = kl_divergence(
+                    Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits), 0),
+                    Independent(OneHotCategoricalStraightThrough(logits=prior_logits.detach()), 0),
+                )
+                kl_reward = 0.5 * kl_reward1 + 0.1 * kl_reward2
+                kl_reward = kl_reward.detach()
+                kl_reward = kl_reward.unsqueeze(-1)
+                # the reward is only used for the next step,
+                # so we only need to update the reward for the next step
+                data["reward"][:, 1:] = kl_reward.to(self.device)
 
-        predicted_rewards = TwoHotEncodingDistribution(reward_predictor(states, deterministics), dims=1).mean
-        predicted_values = TwoHotEncodingDistribution(critic(states, deterministics), dims=1).mean
+            reconstructed_obs = self.decoder(posteriors, deterministics)
+            reconstructed_obs_dist = MSEDistribution(
+                reconstructed_obs, 3
+            )  # 3 is number of dimensions for observation space, shape is (3, H, W)
+            reconstructed_obs_loss = -reconstructed_obs_dist.log_prob(data["obs"][:, 1:]).mean()
 
-        continues_logits = continue_model(states, deterministics)
-        continues = SafeBernoulli(logits=continues_logits).mode
-        lambda_values = compute_lambda_values(
-            predicted_rewards, predicted_values, continues * args.gamma, args.horizon, args.gae_lambda
+            predicted_reward_bins = self.reward_predictor(posteriors, deterministics)
+            predicted_reward_dist = TwoHotEncodingDistribution(predicted_reward_bins, dims=1)
+            reward_loss = -predicted_reward_dist.log_prob(data["reward"][:, 1:]).mean()
+
+            predicted_continue = self.continue_model(posteriors, deterministics)
+            predicted_continue_dist = SafeBernoulli(logits=predicted_continue)
+            true_continue = 1 - data["terminated"][:, 1:]
+            continue_loss = -predicted_continue_dist.log_prob(true_continue).mean()
+
+            # KL balancing, Eq. 3 in the paper
+            kl = kl_loss1 = kl_divergence(
+                Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
+                Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 1),
+            )
+            kl_loss1 = torch.max(kl_loss1, torch.tensor(cfg.free_nats, device=self.device))
+            kl_loss2 = kl_divergence(
+                Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits), 1),
+                Independent(OneHotCategoricalStraightThrough(logits=prior_logits.detach()), 1),
+            )
+            kl_loss2 = torch.max(kl_loss2, torch.tensor(cfg.free_nats, device=self.device))
+            kl_loss = (0.5 * kl_loss1 + 0.1 * kl_loss2).mean()
+
+            model_loss = reconstructed_obs_loss + reward_loss + continue_loss + kl_loss
+
+        self.model_optimizer.zero_grad()
+        self.model_scaler.scale(model_loss).backward()
+        self.model_scaler.unscale_(self.model_optimizer)
+        model_grad_norm = nn.utils.clip_grad_norm_(self.model_params, cfg.model_clip)
+        self.model_scaler.step(self.model_optimizer)
+        self.model_scaler.update()
+
+        metrics = TensorDict.from_dict(
+            {
+                "loss/reconstruction_loss": reconstructed_obs_loss.detach(),
+                "loss/reward_loss": reward_loss.detach(),
+                "loss/continue_loss": continue_loss.detach(),
+                "loss/kl_loss": kl_loss.detach(),
+                "loss/model_loss": model_loss.detach(),
+                "state/kl": kl.detach().mean(),
+                "state/prior_entropy": prior_dist.entropy().detach().mean(),
+                "state/posterior_entropy": posterior_dist.entropy().detach().mean(),
+                "grad_norm/model": model_grad_norm.detach().mean(),
+            },
+            batch_size=torch.Size([]),
         )
 
-        ## Normalize return, Eq. 7 in the paper
-        baselines = predicted_values[:, :-1]
-        offset, invscale = moments(lambda_values)
-        normalized_lambda_values = (lambda_values - offset) / invscale
-        normalized_baselines = (baselines - offset) / invscale
+        return metrics, posteriors.detach(), deterministics.detach()
 
-        advantages = normalized_lambda_values - normalized_baselines
+    def behavior_learning(self, posteriors_: Tensor, deterministics_: Tensor):
+        cfg = self.cfg
 
-        # TODO: what would happen if we don't use discount factor?
-        with torch.no_grad():
-            discount = torch.cumprod(continues[:, :-1] * args.gamma, dim=1) / args.gamma
+        ## reuse the `posteriors` and `deterministics` from model learning, important to detach them!
+        state = posteriors_.detach().view(-1, cfg.stochastic_size)
+        deterministic = deterministics_.detach().view(-1, cfg.deterministic_size)
 
-        actor_dist = actor(states[:, :-1], deterministics[:, :-1])
-        actor_entropy = actor_dist.entropy().unsqueeze(-1)
-        if args.actor_grad == "dynamics":
-            # Below directly computes the gradient through dynamics.
-            actor_target = advantages
-        elif args.actor_grad == "reinforce":
-            actor_target = advantages.detach() * actor_dist.log_prob(actions[:, :-1]).unsqueeze(-1)
-        # For discount factor, see https://ai.stackexchange.com/q/7680
-        actor_loss = -((actor_target + args.actor_ent_coef * actor_entropy) * discount).mean()
-    actor_optimizer.zero_grad()
-    actor_scaler.scale(actor_loss).backward()
-    actor_scaler.unscale_(actor_optimizer)
-    actor_grad_norm = nn.utils.clip_grad_norm_(actor.parameters(), args.actor_clip)
-    actor_scaler.step(actor_optimizer)
-    actor_scaler.update()
+        idx = torch.randperm(state.shape[0])[: cfg.ac_batch_size]
+        state = state[idx]
+        deterministic = deterministic[idx]
 
-    # TODO: implement target critic
-    with torch.autocast(args.device, enabled=args.amp):
-        predicted_value_bins = critic(states[:, :-1].detach(), deterministics[:, :-1].detach())
-        predicted_value_dist = TwoHotEncodingDistribution(predicted_value_bins, dims=1)
-        value_loss = -predicted_value_dist.log_prob(lambda_values.detach())
-        value_loss = (value_loss * discount.squeeze(-1)).mean()
-    critic_optimizer.zero_grad()
-    critic_scaler.scale(value_loss).backward()
-    critic_scaler.unscale_(critic_optimizer)
-    critic_grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), args.critic_clip)
-    critic_scaler.step(critic_optimizer)
-    critic_scaler.update()
+        # Given the following diagram, with horizon=4
+        # Actions:            a'0      a'1      a'2       a'3
+        #                    ^  \     ^  \     ^  \      ^  \
+        #                   /    \   /    \   /    \    /    \
+        #                  /      \ /      \ /      \  /      \
+        # States:        z'0  ->  z'1  ->  z'2  ->  z'3  ->  z'4    <-- input is z'0, output is z'1~z'4
+        # Rewards:                r'1      r'2      r'3      r'4    <-- output
+        # Continues:              c'1      c'2      c'3      c'4    <-- output
+        # Values:                 v'1      v'2      v'3      v'4    <-- output
+        # Lambda-values:          l'1      l'2      l'3             <-- output
 
-    with torch.no_grad():
-        aggregator.update("loss/actor_loss", actor_loss.item())
-        aggregator.update("loss/value_loss", value_loss.item())
-        aggregator.update("state/actor_entropy", actor_entropy.mean().item())
-        aggregator.update("grad_norm/actor", actor_grad_norm.mean().item())
-        aggregator.update("grad_norm/critic", critic_grad_norm.mean().item())
+        with torch.autocast(self.device.type, enabled=self.amp):
+            actions = []
+            states = []
+            deterministics = []
+            for t in range(cfg.horizon):
+                action = self.actor(state.detach(), deterministic.detach()).rsample()  # detach help speed up about 10%
+                deterministic = self.recurrent_model(state, action, deterministic)
+                state_dist, state_logits = self.transition_model(deterministic)
+                state = state_dist.rsample().view(-1, cfg.stochastic_size)
+                actions.append(action)
+                states.append(state)
+                deterministics.append(deterministic)
+
+            actions = torch.stack(actions, dim=1)
+            states = torch.stack(states, dim=1)
+            deterministics = torch.stack(deterministics, dim=1)
+
+            predicted_rewards = TwoHotEncodingDistribution(self.reward_predictor(states, deterministics), dims=1).mean
+            predicted_values = TwoHotEncodingDistribution(self.critic(states, deterministics), dims=1).mean
+
+            continues_logits = self.continue_model(states, deterministics)
+            continues = SafeBernoulli(logits=continues_logits).mode
+            lambda_values = compute_lambda_values(
+                predicted_rewards, predicted_values, continues * cfg.gamma, cfg.horizon, cfg.gae_lambda
+            )
+
+            ## Normalize return, Eq. 7 in the paper
+            baselines = predicted_values[:, :-1]
+            offset, invscale = self.moments(lambda_values)
+            normalized_lambda_values = (lambda_values - offset) / invscale
+            normalized_baselines = (baselines - offset) / invscale
+
+            advantages = normalized_lambda_values - normalized_baselines
+
+            # TODO: what would happen if we don't use discount factor?
+            with torch.no_grad():
+                discount = torch.cumprod(continues[:, :-1] * cfg.gamma, dim=1) / cfg.gamma
+
+            actor_dist = self.actor(states[:, :-1], deterministics[:, :-1])
+            actor_entropy = actor_dist.entropy().unsqueeze(-1)
+            if cfg.actor_grad == "dynamics":
+                # Below directly computes the gradient through dynamics.
+                actor_target = advantages
+            elif cfg.actor_grad == "reinforce":
+                actor_target = advantages.detach() * actor_dist.log_prob(actions[:, :-1]).unsqueeze(-1)
+            # For discount factor, see https://ai.stackexchange.com/q/7680
+            actor_loss = -((actor_target + cfg.actor_ent_coef * actor_entropy) * discount).mean()
+        self.actor_optimizer.zero_grad()
+        self.actor_scaler.scale(actor_loss).backward()
+        self.actor_scaler.unscale_(self.actor_optimizer)
+        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), cfg.actor_clip)
+        self.actor_scaler.step(self.actor_optimizer)
+        self.actor_scaler.update()
+
+        # TODO: implement target critic
+        with torch.autocast(self.device.type, enabled=self.amp):
+            predicted_value_bins = self.critic(states[:, :-1].detach(), deterministics[:, :-1].detach())
+            predicted_value_dist = TwoHotEncodingDistribution(predicted_value_bins, dims=1)
+            target_values = TwoHotEncodingDistribution(
+                self.target_critic(states[:, :-1].detach(), deterministics[:, :-1].detach()), dims=1
+            ).mean
+            value_loss = -predicted_value_dist.log_prob(lambda_values.detach())
+            value_loss -= predicted_value_dist.log_prob(target_values.detach())
+            value_loss = (value_loss * discount.squeeze(-1)).mean()
+        self.critic_optimizer.zero_grad()
+        self.critic_scaler.scale(value_loss).backward()
+        self.critic_scaler.unscale_(self.critic_optimizer)
+        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), cfg.critic_clip)
+        self.critic_scaler.step(self.critic_optimizer)
+        self.critic_scaler.update()
+
+        self.target_critic_params.lerp_(self.critic_params, cfg.critic_tau)
+
+        metrics = TensorDict.from_dict(
+            {
+                "loss/actor_loss": actor_loss.detach(),
+                "loss/value_loss": value_loss.detach(),
+                "state/actor_entropy": actor_entropy.detach().mean(),
+                "state/value_mean": predicted_values.detach().mean(),
+                "state/value_std": predicted_values.detach().std(),
+                "grad_norm/actor": actor_grad_norm.detach().mean(),
+                "grad_norm/critic": critic_grad_norm.detach().mean(),
+            },
+            batch_size=torch.Size([]),
+        )
+        return metrics
+
+    def update(self, data: TensorDict) -> TensorDict:
+        metrics, posteriors, deterministics = self.dynamic_learning(data)
+        metrics.update(self.behavior_learning(posteriors, deterministics))
+        return metrics
+
+    @torch.inference_mode()
+    def evaluate(self, episodes: int, eval_envs: list[BaseVecEnv]) -> TensorDict:
+        cfg = self.cfg
+        num_envs = 1
+        episodic_returns = []
+        videos = []
+        for i in range(episodes):
+            envs = eval_envs[i]
+            obs, _ = envs.reset()
+            posterior = torch.zeros(num_envs, cfg.stochastic_size, device=self.device)
+            deterministic = torch.zeros(num_envs, cfg.deterministic_size, device=self.device)
+            action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=self.device)
+            episodic_return = torch.zeros(num_envs, device=self.device)
+            imgs = [obs.cpu()]
+            while True:
+                embeded_obs = self.encoder(obs)
+                deterministic = self.recurrent_model(posterior, action, deterministic)
+                posterior_dist, _ = self.representation_model(embeded_obs.view(num_envs, -1), deterministic)
+                posterior = posterior_dist.mode.view(-1, cfg.stochastic_size)
+                action = self.actor(posterior, deterministic).mode
+                obs, reward, terminated, truncated, info = envs.step(action)
+                done = torch.logical_or(terminated, truncated)
+                episodic_return += reward
+                if done.any():
+                    break
+                imgs.append(obs.cpu())
+            video = torch.cat(imgs, dim=0)  # (T, C, H, W)
+            videos.append(video)
+            episodic_returns.append(episodic_return.item())
+            envs.close()
+
+        videos = torch.stack(videos)  # (N, T, C, H, W)
+        videos = videos + 0.5
+        videos = (videos.clamp(0, 1) * 255).to(torch.uint8)
+        videos = torch.stack([
+            make_grid(videos[:, t], nrow=4, padding=0) for t in range(videos.shape[1])
+        ])  # (T, C, H, W)
+
+        return TensorDict.from_dict(
+            {
+                "reward/eval_episodic_return": torch.tensor(episodic_returns).mean(),
+                "eval/video": videos,
+            },
+            batch_size=torch.Size([]),
+        )
 
 
-@torch.inference_mode()
-def evaluation(episodes: int):
-    num_envs = 1
-    episodic_returns = []
-    videos = []
-    for i in range(episodes):
-        seed = args.seed + 6666 + i  # ensure different seeds for different episodes
-        envs = create_vector_env(args.env_id, "rgb", num_envs, seed, action_repeat=2, image_size=(64, 64))
-        envs = ObsShiftWrapper(envs)
-        obs, _ = envs.reset()
-        posterior = torch.zeros(num_envs, args.stochastic_size, device=device)
-        deterministic = torch.zeros(num_envs, args.deterministic_size, device=device)
-        action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=device)
-        episodic_return = torch.zeros(num_envs, device=device)
-        imgs = [obs.cpu()]
-        while True:
-            embeded_obs = encoder(obs)
-            deterministic = recurrent_model(posterior, action, deterministic)
-            posterior_dist, _ = representation_model(embeded_obs.view(num_envs, -1), deterministic)
-            posterior = posterior_dist.mode.view(-1, args.stochastic_size)
-            action = actor(posterior, deterministic).mode
-            obs, reward, terminated, truncated, info = envs.step(action)
-            done = torch.logical_or(terminated, truncated)
-            episodic_return += reward
-            if done.any():
-                break
-            imgs.append(obs.cpu())
-        video = torch.cat(imgs, dim=0)  # (T, C, H, W)
-        videos.append(video)
-        episodic_returns.append(episodic_return.item())
-        envs.close()
-    videos = torch.stack(videos)  # (N, T, C, H, W)
-    writer.add_scalar("reward/eval_episodic_return", np.mean(episodic_returns), global_step)
-    writer.add_video("eval/video", videos + 0.5, global_step, fps=15)
+@dataclass
+class Args:
+    # Agent, Environment and Device
+    agent: Dm3Cfg
+    obs_mode: str = "rgb"
+    env_id: str = "dmc/walker-walk-v0"
+    device: str = "cuda"
 
+    # Experiment, Logging and Checkpoint
+    logger: list[str] = field(default_factory=lambda: ["wandb"])
+    exp_name: str = "dm3"
+    log_every: int = 500
+    eval_every: int = 2000
+    eval_episodes: int = 8
+    ckpt_path: str = ""
+    wandb_entity: str = ""
+    wandb_project: str = "fishrl"
+    tqdm: Literal["enabled", "disabled", "rich"] = "enabled"
 
-def save_checkpoint():
-    state = {
-        "encoder": encoder.state_dict(),
-        "decoder": decoder.state_dict(),
-        "recurrent_model": recurrent_model.state_dict(),
-        "transition_model": transition_model.state_dict(),
-        "representation_model": representation_model.state_dict(),
-        "reward_predictor": reward_predictor.state_dict(),
-        "continue_model": continue_model.state_dict(),
-        "actor": actor.state_dict(),
-        "critic": critic.state_dict(),
-        "moments": moments.state_dict(),
-        "model_optimizer": model_optimizer.state_dict(),
-        "actor_optimizer": actor_optimizer.state_dict(),
-        "critic_optimizer": critic_optimizer.state_dict(),
-        "model_scaler": model_scaler.state_dict(),
-        "actor_scaler": actor_scaler.state_dict(),
-        "critic_scaler": critic_scaler.state_dict(),
-        "ratio": ratio.state_dict(),
-        "global_step": global_step,
-    }
-    checkpoint_dir = os.path.join(logdir, "ckpt")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    torch.save(state, os.path.join(checkpoint_dir, f"ckpt_{global_step}.pth"))
-    log.info(f"Saved checkpoint to {os.path.join(checkpoint_dir, f'ckpt_{global_step}.pth')}")
+    # Training
+    seed: int = 0
+    num_envs: int = 4
+    action_repeat: int = 2
+    deterministic: bool = False
+
+    buffer_size: int = 100_000
+    prefill: int = 1000  # same as urlb
+    total_steps: int = 500_000
+
+    # Acceleration
+    compile: bool = False
+    cudagraph: bool = False
+    amp: bool = False
 
 
 def main():
-    global global_step
-    pbar = tqdm(total=args.total_steps, desc="Training")
-    episodic_return = torch.zeros(args.num_envs, device=device)
+    args = tyro.cli(Args)
 
-    posterior = torch.zeros(args.num_envs, args.stochastic_size, device=device)
-    deterministic = torch.zeros(args.num_envs, args.deterministic_size, device=device)
+    device = torch.device(args.device)
+    seed_everything(args.seed)
+    if args.deterministic:
+        enable_deterministic_run()
+
+    ## env and replay buffer
+    envs = create_vector_env(
+        env_id=args.env_id,
+        obs_mode=args.obs_mode,
+        num_envs=args.num_envs,
+        seed=args.seed,
+        action_repeat=args.action_repeat,
+    )
+    envs = UnwrapDictWrapper(envs)
+    envs = ObsShiftWrapper(envs)
+
+    eval_envs = []
+    for i in range(args.eval_episodes):
+        seed = args.seed + 6666 + i  # ensure different seeds for different episodes
+        eval_env = create_vector_env(
+            env_id=args.env_id, obs_mode=args.obs_mode, num_envs=1, seed=seed, action_repeat=args.action_repeat
+        )
+        eval_env = UnwrapDictWrapper(eval_env)
+        eval_env = ObsShiftWrapper(eval_env)
+        eval_envs.append(eval_env)
+
+    buffer = ReplayBuffer(
+        observation_shape=envs.single_observation_space.shape,
+        action_size=envs.single_action_space.shape[0],
+        device=device,
+        num_envs=args.num_envs,
+        capacity=args.buffer_size,
+    )
+
+    ## logger
+    _timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{args.env_id}__{args.exp_name}__env={args.num_envs}__seed={args.seed}__{_timestamp}"
+    logdir = f"logdir/{run_name}"
+    os.makedirs(logdir, exist_ok=True)
+    logger = make_logger(args.logger, logdir, asdict(args), wandb_entity=args.wandb_entity)
+    aggregator = MetricAggregator(device=device)
+
+    agent = Dm3Agent(args.agent, envs, device, args.amp)
+    if args.ckpt_path:
+        agent.load_state_dict(torch.load(args.ckpt_path, map_location=device))
+    if args.compile:
+        agent.update = torch.compile(agent.update, backend="cudagraphs")
+    if args.cudagraph:
+        agent.update = CudaGraphModule(agent.update)
+
+    episodic_return = torch.zeros(args.num_envs, device=device)
+    episodic_length = torch.zeros(args.num_envs, device=device)
+
+    posterior = torch.zeros(args.num_envs, args.agent.stochastic_size, device=device)
+    deterministic = torch.zeros(args.num_envs, args.agent.deterministic_size, device=device)
     action = torch.zeros(args.num_envs, envs.single_action_space.shape[0], device=device)
 
     obs, _ = envs.reset()
-    while global_step < args.total_steps:
-        ## Step the environment and add to buffer
-        with torch.inference_mode(), timer("time/step"), timer("time/step_avg_per_env", MeanMetric):
-            embeded_obs = encoder(obs)
-            deterministic = recurrent_model(posterior, action, deterministic)
-            posterior_dist, _ = representation_model(embeded_obs.view(args.num_envs, -1), deterministic)
-            posterior = posterior_dist.sample().view(-1, args.stochastic_size)
+    ratio = Ratio(ratio=args.agent.ratio)
+    pbar = tqdm(total=args.total_steps, desc="Training", disable=args.tqdm == "disabled")
+    for global_step in range(0, args.total_steps, args.num_envs):
+        ## Get action
+        with torch.inference_mode(), timer("time/get_action"):
             if global_step < args.prefill:
                 action = torch.as_tensor(envs.action_space.sample(), device=device)
             else:
-                action = actor(posterior, deterministic).sample()
+                embeded_obs = agent.encoder(obs)
+                deterministic = agent.recurrent_model(posterior, action, deterministic)
+                posterior_dist, _ = agent.representation_model(embeded_obs.view(args.num_envs, -1), deterministic)
+                posterior = posterior_dist.sample().view(-1, args.agent.stochastic_size)
+                action = agent.get_action(TensorDict(posterior=posterior, deterministic=deterministic), explore=True)
+
+        ## Step the environment
+        with torch.inference_mode(), timer("time/step"):
             next_obs, reward, terminated, truncated, info = envs.step(action)
+
+        ## Add to buffer
+        with torch.inference_mode(), timer("time/add_to_buffer"):
             done = torch.logical_or(terminated, truncated)
-            buffer.add(obs, action, reward, next_obs, done, terminated)
+            real_next_obs = next_obs.clone()
+
+            if truncated.any():
+                try:
+                    real_next_obs[truncated.bool()] = torch.as_tensor(
+                        np.stack(info["final_observation"][truncated.bool().numpy(force=True)]),
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                except Exception as e:
+                    warnings.warn(
+                        f'Error when accessing info["final_observation"], using next_obs instead. Note that this may cause a bias. Error: {e}'
+                    )
+                    real_next_obs = next_obs.clone()
+
+            buffer.add(obs, action, reward, real_next_obs, done, terminated)
             obs = next_obs
 
             episodic_return += reward
+            episodic_length += 1
             if done.any():
-                writer.add_scalar("reward/episodic_return", episodic_return[done].mean().item(), global_step)
+                logger.add({
+                    "reward/episodic_return": episodic_return[done].mean().item(),
+                    "reward/episodic_length": episodic_length[done].mean().item(),
+                })
+                print(f"global_step={global_step}, episodic_return={episodic_return[done].mean().item():.1f}")
+
+                # setting the state of the done envs to some sampled states
                 episodic_return[done] = 0
+                episodic_length[done] = 0
                 posterior[done] = 0
                 deterministic[done] = 0
                 action[done] = 0
 
         ## Update the model
         if global_step > args.prefill:
-            with timer("time/train"), timer("time/train_avg", MeanMetric):
+            with timer("time/train"):
                 gradient_steps = ratio(global_step - args.prefill)
                 for _ in range(gradient_steps):
                     with timer("time/data_sample"):
-                        data = buffer.sample(args.batch_size, args.batch_length)
-                    with timer("time/dynamic_learning"):
-                        posteriors, deterministics = dynamic_learning(data)
-                    with timer("time/behavior_learning"):
-                        behavior_learning(posteriors, deterministics)
+                        data = buffer.sample(args.agent.batch_size, args.agent.chunk_size)
+                    with timer("time/update_agent"):
+                        metrics = agent.update(data)
+                    with torch.no_grad(), timer("time/aggregate_metrics"):
+                        for k, v in metrics.items():
+                            aggregator.update(k, v)
 
-        ## Evaluation
-        if global_step > args.prefill and (global_step - args.prefill) % args.eval_every < args.num_envs:
-            with timer("time/eval"):
-                evaluation(args.eval_episodes)
+        # ## Evaluation
+        # if (
+        #     args.eval_every > 0
+        #     and global_step > args.prefill
+        #     and (global_step - args.prefill) % args.eval_every < args.num_envs
+        # ):
+        #     with timer("time/eval"), torch.inference_mode():
+        #         metrics = agent.evaluate(args.eval_episodes, eval_envs)
+        #     with timer("time/logger_add"):
+        #         # Convert TensorDict to regular dict if needed
+        #         if hasattr(metrics, "to_dict"):
+        #             metrics_dict = metrics.to_dict()
+        #         else:
+        #             metrics_dict = metrics
+        #         logger.add(metrics_dict)
 
-        ## Logging
-        if global_step > args.prefill and (global_step - args.prefill) % args.log_every < args.num_envs:
-            metrics_dict = aggregator.compute()
-            for k, v in metrics_dict.items():
-                writer.add_scalar(k, v, global_step)
-            aggregator.reset()
-
+        # ## Logging
+        if (
+            args.log_every > 0
+            and global_step > args.prefill
+            and (global_step - args.prefill) % args.log_every < args.num_envs
+        ):
+            with timer("time/logger_add"):
+                logger.add(aggregator.compute())
+                aggregator.reset()
             if not timer.disabled:
-                metrics_dict = timer.compute()
-                for k, v in metrics_dict.items():
-                    if k == "time/step_avg_per_env":
-                        v = v / args.num_envs
-                    writer.add_scalar(k, v, global_step)
+                logger.add(timer.compute())
                 timer.reset()
 
-        ## Save checkpoint
-        if global_step > args.prefill and (global_step - args.prefill) % args.checkpoint_every < args.num_envs:
-            with timer("time/save_checkpoint"):
-                save_checkpoint()
-
-        global_step += args.num_envs
+        with timer("time/logger_write"):
+            logger.write()  # NOTE: This should be called only once per step
         pbar.update(args.num_envs)
+        logger.step += args.num_envs
+
+    logger.close()
 
 
 if __name__ == "__main__":
