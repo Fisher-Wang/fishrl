@@ -96,3 +96,5 @@ FishRL is inspired by [CleanRL](https://github.com/vwxyzjn/cleanrl) and [SheepRL
 Its Dreamer v1 and Dreamer v3 implementation has referred to [NaturalDreamer](https://github.com/InexperiencedMe/NaturalDreamer), [SimpleDreamer](https://github.com/kc-ml2/SimpleDreamer), [SheepRL](https://github.com/Eclectic-Sheep/sheeprl), [dreamerv3-torch](https://github.com/NM512/dreamerv3-torch), and [dreamerv3](https://github.com/danijar/dreamerv3).
 
 Its acceleration techniques have referred to [LeanRL](https://github.com/meta-pytorch/LeanRL).
+
+FishRL's previous name before the public release was `RVRL`.
