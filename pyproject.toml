@@ -6,7 +6,6 @@ dependencies = [
     "gymnasium",
     "imageio",
     "loguru",
-    "moviepy==1.0.3",  # see https://github.com/pytorch/pytorch/issues/147317
     "rich",
     "tensordict",
     "torch",
@@ -18,6 +17,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+benchmark = [
+    "torch==2.7.1+cu128",
+    "tensordict==0.10.0",
+]
+tensorboard = [
+    "tensorboard",
+    "moviepy==1.0.3",  # see https://github.com/pytorch/pytorch/issues/147317
+]
+
 dmc = [
     "gymnasium==0.29.1",
     "dm_control==1.0.20",
@@ -82,6 +90,6 @@ index-strategy = "unsafe-first-match"
 [tool.uv.pip]
 extra-index-url = [
     "https://pypi.org/simple",
-    "https://download.pytorch.org/whl/cu121",
+    "https://download.pytorch.org/whl/cu128",
     "https://pypi.nvidia.com",
 ]
