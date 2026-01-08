@@ -22,6 +22,13 @@ The `benchmark` option specifies the packages version for the reproducibility of
 
 ### Advanced Setup
 
+<details><summary>Gymnasium-Robotics environment</summary>
+
+```bash
+uv pip install -e ".[gymnasium_robotics]"
+```
+</details>
+
 <details><summary>ManiSkill environment</summary>
 
 ```bash
@@ -70,17 +77,17 @@ To run the Dreamerv3 agent on the DMControl Walker-walk task with rgb observatio
 python dm3.py --env-id=dmc/walker-walk-v0 --obs-mode=rgb
 ```
 
-For more examples, please refer to the [scripts](./scripts).
+For more examples, please refer to [`script.sh`](./script.sh).
 
 ## Algorithms Implemented
 | Algorithm  | File     |
 |------------|----------|
-| [PPO](https://arxiv.org/pdf/1707.06347)        | ppo.py   |
-| [DDPG](https://arxiv.org/pdf/1509.02971)       | ddpg.py  |
-| [SAC](https://arxiv.org/pdf/1812.05905)        | sac.py   |
-| [DrQ v2](https://arxiv.org/pdf/2107.09645)     | drqv2.py |
-| [Dreamer v1](https://arxiv.org/pdf/1912.01603) | dm1.py   |
-| [Dreamer v3](https://arxiv.org/pdf/2301.04104) | dm3.py   |
+| [PPO](https://arxiv.org/pdf/1707.06347)        | [`ppo.py`](./ppo.py)     |
+| [DDPG](https://arxiv.org/pdf/1509.02971)       | [`ddpg.py`](./ddpg.py)   |
+| [SAC](https://arxiv.org/pdf/1812.05905)        | [`sac.py`](./sac.py)     |
+| [DrQ v2](https://arxiv.org/pdf/2107.09645)     | [`drqv2.py`](./drqv2.py) |
+| [Dreamer v1](https://arxiv.org/pdf/1912.01603) | [`dm1.py`](./dm1.py)     |
+| [Dreamer v3](https://arxiv.org/pdf/2301.04104) | [`dm3.py`](./dm3.py)     |
 
 ## Acknowledgments
 

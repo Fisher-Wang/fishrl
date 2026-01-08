@@ -36,7 +36,7 @@ humanoid_bench = [
     "gymnasium==0.29.1",
     "dm_control==1.0.20",
     "mujoco-mjx==3.1.6",
-    "numpy<2",  # work with dm_control 3.1.6
+    "numpy<2",  # work with dm_control 1.0.20
 ]
 gymnasium_robotics = [
     "gymnasium-robotics",
