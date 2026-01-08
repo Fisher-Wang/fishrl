@@ -24,7 +24,7 @@ from torch.distributions import (
 )
 from torch.distributions.utils import probs_to_logits
 from torchvision.utils import make_grid
-from tqdm.rich import tqdm
+from tqdm import tqdm
 
 from fishrl.envs import BaseVecEnv, create_vector_env
 from fishrl.utils.logger import JsonlOutput, Logger, TensorboardOutput, WandbOutput
@@ -41,12 +41,12 @@ class ObsShiftWrapper(gym.Wrapper):
     # change observation space from [0, 1] to [-0.5, 0.5]
     def reset(self, seed: int | None = None, options: dict[str, Any] | None = None):
         obs, info = self.env.reset(seed=seed, options=options)
-        obs = obs - 0.5
+        obs["rgb"] = obs["rgb"] - 0.5
         return obs, info
 
     def step(self, action: np.ndarray):
         obs, reward, terminated, truncated, info = self.env.step(action)
-        obs = obs - 0.5
+        obs["rgb"] = obs["rgb"] - 0.5
         return obs, reward, terminated, truncated, info
 
 
@@ -251,6 +251,38 @@ class MSEDistribution:
             loss = distance.mean(self._dims)
         elif self._agg == "sum":
             loss = distance.sum(self._dims)
+        else:
+            raise NotImplementedError(self._agg)
+        return -loss
+
+
+class SymlogDist:
+    def __init__(self, mode, dist="mse", agg="sum", tol=1e-8):
+        self._mode = mode
+        self._dist = dist
+        self._agg = agg
+        self._tol = tol
+
+    def mode(self):
+        return symexp(self._mode)
+
+    def mean(self):
+        return symexp(self._mode)
+
+    def log_prob(self, value):
+        assert self._mode.shape == value.shape
+        if self._dist == "mse":
+            distance = (self._mode - symlog(value)) ** 2.0
+            distance = torch.where(distance < self._tol, 0, distance)
+        elif self._dist == "abs":
+            distance = torch.abs(self._mode - symlog(value))
+            distance = torch.where(distance < self._tol, 0, distance)
+        else:
+            raise NotImplementedError(self._dist)
+        if self._agg == "mean":
+            loss = distance.mean(list(range(len(distance.shape)))[2:])
+        elif self._agg == "sum":
+            loss = distance.sum(list(range(len(distance.shape)))[2:])
         else:
             raise NotImplementedError(self._agg)
         return -loss
@@ -487,56 +519,9 @@ def uniform_init_weights(given_scale):
 
 
 ########################################################
-## Configs
-########################################################
-@dataclass
-class Dm3Cfg:
-    ratio: float = 0.5
-    batch_size: int = 16
-    chunk_size: int = 64
-
-    ## Training
-    batch_length: int = 64
-    horizon: int = 15
-    bins: int = 255
-
-    ## World Model
-    model_lr: float = 1e-4
-    model_eps: float = 1e-8
-    model_clip: float = 1000.0
-    free_nats: float = 1.0
-    stochastic_length: int = 32
-    stochastic_classes: int = 32
-    deterministic_size: int = 512
-    embedded_obs_size: int = 4096
-
-    ## Actor Critic
-    actor_grad: Literal["dynamics", "reinforce"] = "dynamics"
-    actor_lr: float = 8e-5
-    actor_eps: float = 1e-5
-    actor_clip: float = 100.0
-    actor_ent_coef: float = 0.0003
-    critic_lr: float = 8e-5
-    critic_eps: float = 1e-5
-    critic_clip: float = 100.0
-    critic_tau: float = 0.02
-    ac_batch_size: int = -1  # if -1, ac_batch_size = batch_size * batch_length
-    gae_lambda: float = 0.95
-    gamma: float = 0.997
-
-    @property
-    def stochastic_size(self):
-        return self.stochastic_length * self.stochastic_classes
-
-    def __post_init__(self):
-        if self.ac_batch_size == -1:
-            self.ac_batch_size = self.batch_size * self.batch_length
-
-
-########################################################
 ## Networks
 ########################################################
-class Encoder(nn.Module):
+class CNNEncoder(nn.Module):
     ## HACK: the output size is 4096, which should be equal to embedded_obs_size
     def __init__(self):
         super().__init__()
@@ -562,7 +547,7 @@ class Encoder(nn.Module):
         return embedded_obs.reshape(B, -1)  # flatten the last 3 dimensions C, H, W
 
 
-class Decoder(nn.Module):
+class CNNDecoder(nn.Module):
     def __init__(self, cfg: Dm3Cfg):
         super().__init__()
         self.decoder = nn.Sequential(
@@ -591,8 +576,54 @@ class Decoder(nn.Module):
         return reconstructed_obs
 
 
+class MLP(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, act: nn.Module):
+        super().__init__()
+        layers = []
+        for _ in range(num_layers):
+            layers.extend([
+                nn.Linear(input_dim, hidden_dim, bias=False),
+                nn.LayerNorm(hidden_dim, eps=1e-3),
+                act(),
+            ])
+            input_dim = hidden_dim
+        layers.append(nn.Linear(input_dim, output_dim))
+        self.mlp = nn.Sequential(*layers)
+        [m.apply(init_weights) for m in self.mlp[:-1]]
+        self.mlp[-1].apply(uniform_init_weights(1.0))
+
+    def forward(self, x):
+        return self.mlp(x)
+
+
+class MLPEncoder(nn.Module):
+    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv):
+        super().__init__()
+        obs_dim = envs.single_observation_space.shape[0]
+        self.encoder = MLP(obs_dim, 1024, cfg.embedded_obs_size, 5, nn.SiLU)
+
+    def forward(self, obs: Tensor) -> Tensor:
+        x = symlog(obs)
+        return self.encoder(x)
+
+
+class MLPDecoder(nn.Module):
+    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv):
+        super().__init__()
+        obs_dim = envs.single_observation_space.shape[0]
+        self.decoder = MLP(cfg.deterministic_size + cfg.stochastic_size, 1024, obs_dim, 5, nn.SiLU)
+
+    def forward(self, posterior: Tensor, deterministic: Tensor) -> Tensor:
+        x = torch.cat([posterior, deterministic], dim=-1)
+        input_shape = x.shape
+        x = x.flatten(0, 1)
+        x = self.decoder(x)
+        x = x.unflatten(0, input_shape[:2])
+        return x
+
+
 class RecurrentModel(nn.Module):
-    def __init__(self, cfg: Dm3Cfg, envs):
+    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(cfg.stochastic_size + envs.single_action_space.shape[0], 512, bias=False),
@@ -760,15 +791,30 @@ class Critic(nn.Module):
 ## Agent
 ########################################################
 class Dm3Agent:
-    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv, device: torch.device, amp: bool = False):
+    def __init__(
+        self,
+        cfg: Dm3Cfg,
+        envs: BaseVecEnv,
+        device: torch.device,
+        amp: bool = False,
+        obs_mode: Literal["rgb", "prop"] = "rgb",
+        **kargs,
+    ):
         self.cfg = cfg
         self.device = device
         self.num_envs = envs.num_envs
         self.amp = amp
+        self.obs_mode = obs_mode
         self.use_kl_curiosity = False
 
-        self.encoder = Encoder().to(device)
-        self.decoder = Decoder(cfg).to(device)
+        assert obs_mode in ["rgb", "prop"]
+        if obs_mode == "rgb":
+            self.encoder = CNNEncoder().to(device)
+            self.decoder = CNNDecoder(cfg).to(device)
+        else:
+            self.encoder = MLPEncoder(cfg, envs).to(device)
+            self.decoder = MLPDecoder(cfg, envs).to(device)
+
         self.recurrent_model = RecurrentModel(cfg, envs).to(device)
         self.transition_model = TransitionModel(cfg).to(device)
         self.representation_model = RepresentationModel(cfg).to(device)
@@ -864,9 +910,12 @@ class Dm3Agent:
                 data["reward"][:, 1:] = kl_reward.to(self.device)
 
             reconstructed_obs = self.decoder(posteriors, deterministics)
-            reconstructed_obs_dist = MSEDistribution(
-                reconstructed_obs, 3
-            )  # 3 is number of dimensions for observation space, shape is (3, H, W)
+            if self.obs_mode == "rgb":
+                reconstructed_obs_dist = MSEDistribution(
+                    reconstructed_obs, 3
+                )  # 3 is number of dimensions for observation space, shape is (3, H, W)
+            else:
+                reconstructed_obs_dist = SymlogDist(reconstructed_obs)
             reconstructed_obs_loss = -reconstructed_obs_dist.log_prob(data["obs"][:, 1:]).mean()
 
             predicted_reward_bins = self.reward_predictor(posteriors, deterministics)
@@ -1032,35 +1081,57 @@ class Dm3Agent:
         return metrics
 
     @torch.inference_mode()
-    def evaluate(self, episodes: int, eval_envs: list[BaseVecEnv]) -> TensorDict:
-        cfg = self.cfg
+    def evaluate(self, episodes: int, eval_envs: list[BaseVecEnv], eval_nsteps: int = -1) -> TensorDict:
         num_envs = 1
         episodic_returns = []
+        episodic_lengths = []
+        success_onces = []
         videos = []
         for i in range(episodes):
             envs = eval_envs[i]
             obs, _ = envs.reset()
-            posterior = torch.zeros(num_envs, cfg.stochastic_size, device=self.device)
-            deterministic = torch.zeros(num_envs, cfg.deterministic_size, device=self.device)
-            action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=self.device)
             episodic_return = torch.zeros(num_envs, device=self.device)
-            imgs = [obs.cpu()]
+            imgs = []
+            istep = 0
+            success_once = torch.zeros(num_envs, device=self.device, dtype=torch.bool)
+
+            # reset the full model at the beginning
+            posterior = torch.zeros(num_envs, self.cfg.stochastic_size, device=self.device)
+            deterministic = torch.zeros(num_envs, self.cfg.deterministic_size, device=self.device)
+            action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=self.device)
+
             while True:
-                embeded_obs = self.encoder(obs)
+                embeded_obs = self.encoder(obs[self.obs_mode])
                 deterministic = self.recurrent_model(posterior, action, deterministic)
                 posterior_dist, _ = self.representation_model(embeded_obs.view(num_envs, -1), deterministic)
-                posterior = posterior_dist.mode.view(-1, cfg.stochastic_size)
+                posterior = posterior_dist.mode.view(-1, self.cfg.stochastic_size)
+                recon_obs = self.decoder(posterior.unsqueeze(0), deterministic.unsqueeze(0)).squeeze(0)
+                if self.obs_mode == "rgb":
+                    error = (obs["rgb"] - recon_obs) / 2.0
+                    imgs.append(torch.cat([obs["rgb"], recon_obs, error], dim=2).cpu())
+                else:
+                    imgs.append(obs["rgb"].cpu())
+
                 action = self.actor(posterior, deterministic).mode
                 obs, reward, terminated, truncated, info = envs.step(action)
                 done = torch.logical_or(terminated, truncated)
+                if "final_info" in info and "success" in info["final_info"]:
+                    success_once = torch.logical_or(success_once, info["final_info"]["success"])
                 episodic_return += reward
-                if done.any():
+                istep += 1
+                if (eval_nsteps > 0 and istep >= eval_nsteps) or (eval_nsteps <= 0 and done.any()):
                     break
-                imgs.append(obs.cpu())
+                if done.any():
+                    # reset the full model when terminated or truncated.
+                    posterior = torch.zeros(num_envs, self.cfg.stochastic_size, device=self.device)
+                    deterministic = torch.zeros(num_envs, self.cfg.deterministic_size, device=self.device)
+                    action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=self.device)
+
             video = torch.cat(imgs, dim=0)  # (T, C, H, W)
             videos.append(video)
-            episodic_returns.append(episodic_return.item())
-            envs.close()
+            episodic_returns.append(episodic_return.mean().item())
+            episodic_lengths.append(istep)
+            success_onces.append(success_once.float().mean().item())
 
         videos = torch.stack(videos)  # (N, T, C, H, W)
         videos = videos + 0.5
@@ -1072,10 +1143,56 @@ class Dm3Agent:
         return TensorDict.from_dict(
             {
                 "reward/eval_episodic_return": torch.tensor(episodic_returns).mean(),
+                "reward/eval_episodic_length": torch.tensor(episodic_lengths).float().mean(),
+                "reward/eval_success_once": torch.tensor(success_onces).mean(),
                 "eval/video": videos,
             },
             batch_size=torch.Size([]),
         )
+
+
+@dataclass
+class Dm3Cfg:
+    ratio: float = 0.5
+    batch_size: int = 16
+    chunk_size: int = 64
+
+    ## Training
+    batch_length: int = 64
+    horizon: int = 15
+    bins: int = 255
+
+    ## World Model
+    model_lr: float = 1e-4
+    model_eps: float = 1e-8
+    model_clip: float = 1000.0
+    free_nats: float = 1.0
+    stochastic_length: int = 32
+    stochastic_classes: int = 32
+    deterministic_size: int = 512
+    embedded_obs_size: int = 4096
+
+    ## Actor Critic
+    actor_grad: Literal["dynamics", "reinforce"] = "dynamics"
+    actor_lr: float = 8e-5
+    actor_eps: float = 1e-5
+    actor_clip: float = 100.0
+    actor_ent_coef: float = 0.0003
+    critic_lr: float = 8e-5
+    critic_eps: float = 1e-5
+    critic_clip: float = 100.0
+    critic_tau: float = 0.02
+    ac_batch_size: int = -1  # if -1, ac_batch_size = batch_size * batch_length
+    gae_lambda: float = 0.95
+    gamma: float = 0.997
+
+    @property
+    def stochastic_size(self):
+        return self.stochastic_length * self.stochastic_classes
+
+    def __post_init__(self):
+        if self.ac_batch_size == -1:
+            self.ac_batch_size = self.batch_size * self.batch_length
 
 
 @dataclass
@@ -1091,7 +1208,7 @@ class Args:
     exp_name: str = "dm3"
     log_every: int = 500
     eval_every: int = 2000
-    eval_episodes: int = 8
+    eval_episodes: int = 4
     ckpt_path: str = ""
     wandb_entity: str = ""
     wandb_project: str = "fishrl"
@@ -1129,16 +1246,16 @@ def main():
         seed=args.seed,
         action_repeat=args.action_repeat,
     )
+    if args.obs_mode == "rgb":
+        envs = ObsShiftWrapper(envs)
     envs = UnwrapDictWrapper(envs)
-    envs = ObsShiftWrapper(envs)
 
     eval_envs = []
     for i in range(args.eval_episodes):
         seed = args.seed + 6666 + i  # ensure different seeds for different episodes
         eval_env = create_vector_env(
-            env_id=args.env_id, obs_mode=args.obs_mode, num_envs=1, seed=seed, action_repeat=args.action_repeat
+            env_id=args.env_id, obs_mode="prop,rgb", num_envs=1, seed=seed, action_repeat=args.action_repeat
         )
-        eval_env = UnwrapDictWrapper(eval_env)
         eval_env = ObsShiftWrapper(eval_env)
         eval_envs.append(eval_env)
 
@@ -1158,11 +1275,11 @@ def main():
     logger = make_logger(args.logger, logdir, asdict(args), wandb_entity=args.wandb_entity)
     aggregator = MetricAggregator(device=device)
 
-    agent = Dm3Agent(args.agent, envs, device, args.amp)
+    agent = Dm3Agent(args.agent, envs, device, args.amp, args.obs_mode)
     if args.ckpt_path:
         agent.load_state_dict(torch.load(args.ckpt_path, map_location=device))
     if args.compile:
-        agent.update = torch.compile(agent.update, backend="cudagraphs")
+        agent.update = torch.compile(agent.update)
     if args.cudagraph:
         agent.update = CudaGraphModule(agent.update)
 
@@ -1243,20 +1360,15 @@ def main():
                             aggregator.update(k, v)
 
         # ## Evaluation
-        # if (
-        #     args.eval_every > 0
-        #     and global_step > args.prefill
-        #     and (global_step - args.prefill) % args.eval_every < args.num_envs
-        # ):
-        #     with timer("time/eval"), torch.inference_mode():
-        #         metrics = agent.evaluate(args.eval_episodes, eval_envs)
-        #     with timer("time/logger_add"):
-        #         # Convert TensorDict to regular dict if needed
-        #         if hasattr(metrics, "to_dict"):
-        #             metrics_dict = metrics.to_dict()
-        #         else:
-        #             metrics_dict = metrics
-        #         logger.add(metrics_dict)
+        if (
+            args.eval_every > 0
+            and global_step > args.prefill
+            and (global_step - args.prefill) % args.eval_every < args.num_envs
+        ):
+            with timer("time/eval"), torch.inference_mode():
+                metrics = agent.evaluate(args.eval_episodes, eval_envs)
+            with timer("time/logger_add"):
+                logger.add(metrics.to_dict())
 
         # ## Logging
         if (

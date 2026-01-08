@@ -52,7 +52,6 @@ def create_vector_env(
             for i in range(num_envs)
         ]
         if "prop" in obs_mode.split(","):
-            breakpoint()
             env_fns = [lambda: FlattenObsByKeyWrapper(func(), ["prop"]) for func in env_fns]
         envs = SyncVectorSetStateWrapper(env_fns)
         envs = NumpyToTorch(envs, device)
