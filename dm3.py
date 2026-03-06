@@ -186,18 +186,18 @@ def compute_lambda_values(
         gae_lambda: float - lambda parameter for GAE (λ, typically 0.95)
 
     Returns:
-        Tensor: (batch_size, horizon-1) - R_t^λ is the lambda return at time t = 0, ..., T-2.
+        Tensor: (batch_size, horizon) - R_t^λ is the lambda return at time t = 0, ..., T-1.
     """
-    # Given the following diagram, with horizon=4
-    # Actions:            a'0      a'1      a'2
-    #                     ^ \      ^ \      ^ \
-    #                    /   \    /   \    /   \
-    #                   /     \  /     \  /     \
-    # States:         z0  ->  z'1  ->  z'2  ->  z'3
-    # Values:         v'0    [v'1]    [v'2]    [v'3]      <-- input
-    # Rewards:       [r'0]   [r'1]    [r'2]     r'3       <-- input
-    # Continues:     [c'0]   [c'1]    [c'2]     c'3       <-- input
-    # Lambda-values: [l'0]   [l'1]    [l'2]     l'3       <-- output
+    # Given the following diagram, with horizon=3
+    # Actions:          a'0      a'1      a'2
+    #                   ^ \      ^ \      ^ \
+    #                  /   \    /   \    /   \
+    #                 /     \  /     \  /     \
+    # States:        z'0  -> z'1  -> z'2  -> z'3
+    # Values:         v'0   [v'1]   [v'2]   [v'3]    <-- input
+    # Rewards:       [r'0]  [r'1]   [r'2]    r'3     <-- input
+    # Continues:     [c'0]  [c'1]   [c'2]    c'3     <-- input
+    # Lambda-values: [l'0]  [l'1]   [l'2]            <-- output
 
     rewards = rewards[:, :-1]
     continues = continues[:, :-1]
@@ -208,8 +208,8 @@ def compute_lambda_values(
 
     # Compute lambda returns backward in time
     outputs = torch.zeros_like(values)
-    outputs[:, -1] = next_values[:, -1]  # initialize with the last value
-    for t in range(horizon - 2, -1, -1):  # t = T-2, ..., 0
+    outputs[:, -1] = next_values[:, -1]  # initialize with the last value (bootstrap)
+    for t in range(horizon - 1, -1, -1):  # t = T-1, ..., 0
         # R_t^λ = [r_t + γ * (1 - λ) * V(s_{t+1})] + γ * λ * R_{t+1}^λ
         outputs[:, t] = inputs[:, t] + continues[:, t] * gae_lambda * outputs[:, t + 1]
 
@@ -977,29 +977,31 @@ class Dm3Agent:
         state = state[idx]
         deterministic = deterministic[idx]
 
-        # Given the following diagram, with horizon=4
-        # Actions:            a'0      a'1      a'2       a'3
-        #                    ^  \     ^  \     ^  \      ^  \
-        #                   /    \   /    \   /    \    /    \
-        #                  /      \ /      \ /      \  /      \
-        # States:        z'0  ->  z'1  ->  z'2  ->  z'3  ->  z'4    <-- input is z'0, output is z'1~z'4
-        # Rewards:                r'1      r'2      r'3      r'4    <-- output
-        # Continues:              c'1      c'2      c'3      c'4    <-- output
-        # Values:                 v'1      v'2      v'3      v'4    <-- output
-        # Lambda-values:          l'1      l'2      l'3             <-- output
+        # Given the following diagram, with horizon H=3
+        # Actions:           [a'0]    [a'1]    [a'2]
+        #                    ^  \     ^  \     ^  \
+        #                   /    \   /    \   /    \
+        #                  /      \ /      \ /      \
+        # States:        [z'0] -> [z'1] -> [z'2] -> [z'3]  <-- input is z'0, output is z'1~z'3
+        # Rewards:       [r'0]    [r'1]    [r'2]    [r'3]  <-- output
+        # Continues:     [c'0]    [c'1]    [c'2]    [c'3]  <-- output
+        # Values:        [v'0]    [v'1]    [v'2]    [v'3]  <-- output
+        # Lambda-values: [l'0]    [l'1]    [l'2]           <-- output
 
         with torch.autocast(self.device.type, enabled=self.amp):
             actions = []
             states = []
             deterministics = []
             for t in range(cfg.horizon):
+                states.append(state)
+                deterministics.append(deterministic)
                 action = self.actor(state.detach(), deterministic.detach()).rsample()  # detach help speed up about 10%
                 deterministic = self.recurrent_model(state, action, deterministic)
                 state_dist, state_logits = self.transition_model(deterministic)
                 state = state_dist.rsample().view(-1, cfg.stochastic_size)
                 actions.append(action)
-                states.append(state)
-                deterministics.append(deterministic)
+            states.append(state)
+            deterministics.append(deterministic)
 
             actions = torch.stack(actions, dim=1)
             states = torch.stack(states, dim=1)
@@ -1026,13 +1028,16 @@ class Dm3Agent:
             with torch.no_grad():
                 discount = torch.cumprod(continues[:, :-1] * cfg.gamma, dim=1) / cfg.gamma
 
-            actor_dist = self.actor(states[:, :-1], deterministics[:, :-1])
-            actor_entropy = actor_dist.entropy().unsqueeze(-1)
             if cfg.actor_grad == "dynamics":
-                # Below directly computes the gradient through dynamics.
+                # Directly computes the gradient through dynamics.
+                actor_dist = self.actor(states[:, :-1], deterministics[:, :-1])
+                actor_entropy = actor_dist.entropy().unsqueeze(-1)
                 actor_target = advantages
             elif cfg.actor_grad == "reinforce":
-                actor_target = advantages.detach() * actor_dist.log_prob(actions[:, :-1]).unsqueeze(-1)
+                actor_dist = self.actor(states[:, :-1].detach(), deterministics[:, :-1].detach())
+                actor_entropy = actor_dist.entropy().unsqueeze(-1)
+                actor_target = advantages.detach() * actor_dist.log_prob(actions.detach()).unsqueeze(-1)
+
             # For discount factor, see https://ai.stackexchange.com/q/7680
             actor_loss = -((actor_target + cfg.actor_ent_coef * actor_entropy) * discount).mean()
         self.actor_optimizer.zero_grad()
@@ -1210,7 +1215,7 @@ class Args:
     eval_every: int = 2000
     eval_episodes: int = 4
     ckpt_path: str = ""
-    wandb_entity: str = ""
+    wandb_entity: str | None = None
     wandb_project: str = "fishrl"
     tqdm: Literal["enabled", "disabled", "rich"] = "enabled"
 
