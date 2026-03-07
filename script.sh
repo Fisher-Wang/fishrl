@@ -55,3 +55,7 @@ python dm1.py --env-id dmc/walker-walk-v0
 
 ## DMControl Tasks
 python dm3.py --env-id dmc/walker-walk-v0
+
+## DMLab Tasks (discrete actions, rgb obs)
+python dm3.py --env-id dmlab/rooms_collect_good_objects_train --obs-mode=rgb --action-repeat=4 --num-envs=4
+python dm3.py --env-id dmlab/explore_goal_locations_small --obs-mode=rgb --action-repeat=4 --num-envs=4

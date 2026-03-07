@@ -623,10 +623,10 @@ class MLPDecoder(nn.Module):
 
 
 class RecurrentModel(nn.Module):
-    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv):
+    def __init__(self, cfg: Dm3Cfg, action_size: int):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(cfg.stochastic_size + envs.single_action_space.shape[0], 512, bias=False),
+            nn.Linear(cfg.stochastic_size + action_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
         )
@@ -742,8 +742,11 @@ class ContinueModel(nn.Module):
 
 
 class Actor(nn.Module):
-    def __init__(self, cfg: Dm3Cfg, envs: BaseVecEnv):
+    def __init__(self, cfg: Dm3Cfg, action_size: int, discrete: bool = False):
         super().__init__()
+        self._discrete = discrete
+        self._action_size = action_size
+        output_dim = action_size if discrete else action_size * 2
         self.actor = nn.Sequential(
             nn.Linear(cfg.deterministic_size + cfg.stochastic_size, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
@@ -751,19 +754,23 @@ class Actor(nn.Module):
             nn.Linear(512, 512, bias=False),
             nn.LayerNorm(512, eps=1e-3),
             nn.SiLU(),
-            nn.Linear(512, envs.single_action_space.shape[0] * 2),
+            nn.Linear(512, output_dim),
         )
         [m.apply(init_weights) for m in self.actor[:-1]]
         self.actor[-1].apply(uniform_init_weights(1.0))
 
     def forward(self, posterior: Tensor, deterministic: Tensor) -> Distribution:
         x = torch.cat([posterior, deterministic], dim=-1)
-        mean, std = self.actor(x).chunk(2, dim=-1)
-        std_min, std_max = 0.1, 1
-        mean = F.tanh(mean)
-        std = std_min + (std_max - std_min) * F.sigmoid(std + 2.0)
-        action_dist = Independent(Normal(mean, std), 1)
-        return action_dist
+        if self._discrete:
+            logits = self.actor(x)
+            logits = _unimix(logits, self._action_size)
+            return OneHotCategoricalStraightThrough(logits=logits)
+        else:
+            mean, std = self.actor(x).chunk(2, dim=-1)
+            std_min, std_max = 0.1, 1
+            mean = F.tanh(mean)
+            std = std_min + (std_max - std_min) * F.sigmoid(std + 2.0)
+            return Independent(Normal(mean, std), 1)
 
 
 class Critic(nn.Module):
@@ -796,9 +803,10 @@ class Dm3Agent:
         cfg: Dm3Cfg,
         envs: BaseVecEnv,
         device: torch.device,
+        action_size: int,
+        discrete: bool = False,
         amp: bool = False,
         obs_mode: Literal["rgb", "prop"] = "rgb",
-        **kargs,
     ):
         self.cfg = cfg
         self.device = device
@@ -806,6 +814,8 @@ class Dm3Agent:
         self.amp = amp
         self.obs_mode = obs_mode
         self.use_kl_curiosity = False
+        self.discrete = discrete
+        self.action_size = action_size
 
         assert obs_mode in ["rgb", "prop"]
         if obs_mode == "rgb":
@@ -815,12 +825,12 @@ class Dm3Agent:
             self.encoder = MLPEncoder(cfg, envs).to(device)
             self.decoder = MLPDecoder(cfg, envs).to(device)
 
-        self.recurrent_model = RecurrentModel(cfg, envs).to(device)
+        self.recurrent_model = RecurrentModel(cfg, self.action_size).to(device)
         self.transition_model = TransitionModel(cfg).to(device)
         self.representation_model = RepresentationModel(cfg).to(device)
         self.reward_predictor = RewardPredictor(cfg).to(device)
         self.continue_model = ContinueModel(cfg).to(device)
-        self.actor = Actor(cfg, envs).to(device)
+        self.actor = Actor(cfg, self.action_size, self.discrete).to(device)
         self.critic = Critic(cfg).to(device)
         self.target_critic = Critic(cfg).to(device)
         self.critic_params = from_module(self.critic).data
@@ -1106,7 +1116,7 @@ class Dm3Agent:
             # reset the full model at the beginning
             posterior = torch.zeros(num_envs, self.cfg.stochastic_size, device=self.device)
             deterministic = torch.zeros(num_envs, self.cfg.deterministic_size, device=self.device)
-            action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=self.device)
+            action = torch.zeros(num_envs, self.action_size, device=self.device)
 
             while True:
                 embeded_obs = self.encoder(obs[self.obs_mode])
@@ -1121,7 +1131,7 @@ class Dm3Agent:
                     imgs.append(obs["rgb"].cpu())
 
                 action = self.actor(posterior, deterministic).mode
-                obs, reward, terminated, truncated, info = envs.step(action)
+                obs, reward, terminated, truncated, info = envs.step(action.argmax(dim=-1) if self.discrete else action)
                 done = torch.logical_or(terminated, truncated)
                 if "final_info" in info and "success" in info["final_info"]:
                     success_once = torch.logical_or(success_once, info["final_info"]["success"])
@@ -1133,7 +1143,7 @@ class Dm3Agent:
                     # reset the full model when terminated or truncated.
                     posterior = torch.zeros(num_envs, self.cfg.stochastic_size, device=self.device)
                     deterministic = torch.zeros(num_envs, self.cfg.deterministic_size, device=self.device)
-                    action = torch.zeros(num_envs, envs.single_action_space.shape[0], device=self.device)
+                    action = torch.zeros(num_envs, self.action_size, device=self.device)
 
             video = torch.cat(imgs, dim=0)  # (T, C, H, W)
             videos.append(video)
@@ -1141,7 +1151,10 @@ class Dm3Agent:
             episodic_lengths.append(istep)
             success_onces.append(success_once.float().mean().item())
 
-        videos = torch.stack(videos)  # (N, T, C, H, W)
+        max_len = max(v.shape[0] for v in videos)
+        videos = torch.stack([
+            torch.cat([v, v.new_zeros(max_len - v.shape[0], *v.shape[1:])]) for v in videos
+        ])  # (N, T, C, H, W)
         videos = videos + 0.5
         videos = (videos.clamp(0, 1) * 255).to(torch.uint8)
         videos = torch.stack([
@@ -1267,9 +1280,12 @@ def main():
         eval_env = ObsShiftWrapper(eval_env)
         eval_envs.append(eval_env)
 
+    discrete = isinstance(envs.single_action_space, gym.spaces.Discrete)
+    action_size = envs.single_action_space.n if discrete else envs.single_action_space.shape[0]
+
     buffer = ReplayBuffer(
         observation_shape=envs.single_observation_space.shape,
-        action_size=envs.single_action_space.shape[0],
+        action_size=action_size,
         device=device,
         num_envs=args.num_envs,
         capacity=args.buffer_size,
@@ -1283,7 +1299,7 @@ def main():
     logger = make_logger(args.logger, logdir, asdict(args), wandb_entity=args.wandb_entity)
     aggregator = MetricAggregator(device=device)
 
-    agent = Dm3Agent(args.agent, envs, device, args.amp, args.obs_mode)
+    agent = Dm3Agent(args.agent, envs, device, action_size, discrete, args.amp, args.obs_mode)
     if args.ckpt_path:
         agent.load_state_dict(torch.load(args.ckpt_path, map_location=device))
     if args.compile:
@@ -1296,7 +1312,7 @@ def main():
 
     posterior = torch.zeros(args.num_envs, args.agent.stochastic_size, device=device)
     deterministic = torch.zeros(args.num_envs, args.agent.deterministic_size, device=device)
-    action = torch.zeros(args.num_envs, envs.single_action_space.shape[0], device=device)
+    action = torch.zeros(args.num_envs, action_size, device=device)
 
     obs, _ = envs.reset()
     ratio = Ratio(ratio=args.agent.ratio)
@@ -1306,6 +1322,8 @@ def main():
         with torch.inference_mode(), timer("time/get_action"):
             if global_step < args.prefill:
                 action = torch.as_tensor(envs.action_space.sample(), device=device)
+                if agent.discrete:
+                    action = F.one_hot(action.long(), action_size).float()
             else:
                 embeded_obs = agent.encoder(obs)
                 deterministic = agent.recurrent_model(posterior, action, deterministic)
@@ -1315,7 +1333,7 @@ def main():
 
         ## Step the environment
         with torch.inference_mode(), timer("time/step"):
-            next_obs, reward, terminated, truncated, info = envs.step(action)
+            next_obs, reward, terminated, truncated, info = envs.step(action.argmax(dim=-1) if discrete else action)
 
         ## Add to buffer
         with torch.inference_mode(), timer("time/add_to_buffer"):

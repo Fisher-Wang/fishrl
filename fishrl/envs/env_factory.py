@@ -38,7 +38,20 @@ def create_vector_env(
     Returns:
         Vectorized environment
     """
-    if env_id.startswith("dmc/"):
+    if env_id.startswith("dmlab/"):
+        from .dmlab_env import DMLab
+
+        level = env_id.replace("dmlab/", "")
+        env_fns = [
+            lambda level=level, seed=seed + i * SEED_SPACING: DMLab(
+                level, seed, image_size, action_repeat=action_repeat
+            )
+            for i in range(num_envs)
+        ]
+        envs = gym.vector.SyncVectorEnv(env_fns)
+        envs = NumpyToTorch(envs, device)
+        return envs
+    elif env_id.startswith("dmc/"):
         from .dmc_env import DMControlEnv
 
         env_fns = [
