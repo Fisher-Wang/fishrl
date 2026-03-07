@@ -852,7 +852,6 @@ class Dm3Agent:
 
     def dynamic_learning(self, data: TensorDict) -> tuple[TensorDict, Tensor, Tensor]:
         # TODO: utilize "next_obs" to update the model
-        # TODO: since the replay buffer may contain termination/truncation in the middle of a rollout, we need to handle this case by resetting posterior, deterministic, and action to initial state (zero)
 
         # Given the following diagram, with batch_length=4
         # Actions:           [a'0]    [a'1]    [a'2]    a'3  <-- input
@@ -876,7 +875,11 @@ class Dm3Agent:
             posteriors = []
             posteriors_logits = []
             for t in range(1, cfg.batch_length):
-                deterministic = self.recurrent_model(posterior, data["action"][:, t - 1], deterministic)
+                # Reset state for envs whose episode ended at t-1 (obs[:, t] is a new episode start)
+                cont = 1.0 - data["done"][:, t - 1]  # (batch_size, 1)
+                posterior = posterior * cont
+                deterministic = deterministic * cont
+                deterministic = self.recurrent_model(posterior, data["action"][:, t - 1] * cont, deterministic)
                 prior_dist, prior_logits = self.transition_model(deterministic)
                 posterior_dist, posterior_logits = self.representation_model(embeded_obs[:, t], deterministic)
                 posterior = posterior_dist.rsample().view(-1, cfg.stochastic_size)
