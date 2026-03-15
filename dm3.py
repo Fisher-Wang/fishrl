@@ -813,7 +813,6 @@ class Dm3Agent:
         self.num_envs = envs.num_envs
         self.amp = amp
         self.obs_mode = obs_mode
-        self.use_kl_curiosity = False
         self.discrete = discrete
         self.action_size = action_size
 
@@ -903,24 +902,6 @@ class Dm3Agent:
             prior_logits = torch.stack(priors_logits, dim=1).to(self.device)
             posteriors = torch.stack(posteriors, dim=1).to(self.device)
             posteriors_logits = torch.stack(posteriors_logits, dim=1).to(self.device)
-
-            if self.use_kl_curiosity:
-                # calculate real kl curio reward with the wm itself
-                # TODO: check if this reward is really correct
-                kl_reward1 = kl_divergence(
-                    Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 0),
-                    Independent(OneHotCategoricalStraightThrough(logits=prior_logits), 0),
-                )
-                kl_reward2 = kl_divergence(
-                    Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits), 0),
-                    Independent(OneHotCategoricalStraightThrough(logits=prior_logits.detach()), 0),
-                )
-                kl_reward = 0.5 * kl_reward1 + 0.1 * kl_reward2
-                kl_reward = kl_reward.detach()
-                kl_reward = kl_reward.unsqueeze(-1)
-                # the reward is only used for the next step,
-                # so we only need to update the reward for the next step
-                data["reward"][:, 1:] = kl_reward.to(self.device)
 
             reconstructed_obs = self.decoder(posteriors, deterministics)
             if self.obs_mode == "rgb":
