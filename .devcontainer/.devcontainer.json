@@ -1,0 +1,25 @@
+{
+    "name": "FishRL Development Container",
+    "privileged": true,
+    "dockerComposeFile": "../docker-compose.yml",
+    "service": "fishrl",
+    "workspaceFolder": "/home/ghr/fishrl",
+    "runArgs": [
+        "--memory=16g",
+        "--memory-swap=16g"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",  // for vscode user
+                "anysphere.cursorpyright",   // for cursor user
+                "charliermarsh.ruff"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "terminal.integrated.profiles.linux": { "bash": { "path": "/bin/bash" } }
+            }
+        }
+    }
+}
