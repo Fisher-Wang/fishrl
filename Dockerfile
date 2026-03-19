@@ -40,6 +40,7 @@ RUN apt update && apt install -y --no-install-recommends \
     # below for dmlab
     libsdl2-dev \
     libosmesa6 \
+    zip \
     && apt clean
 RUN apt install -y -o Dpkg::Options::="--force-confold" sudo
 
