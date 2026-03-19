@@ -870,6 +870,9 @@ class Dm3Agent:
         # States:          0  ->  z'1  ->  z'2  ->  z'3      <-- output
         # Observations:   o'0    [o'1]    [o'2]    [o'3]     <-- input
         # Rewards:                r'1      r'2      r'3      <-- output
+        #                          ^
+        #                          |
+        #                          this is actually data["reward"][:, 0]
         # Continues:              c'1      c'2      c'3      <-- output
 
         cfg = self.cfg
@@ -914,11 +917,11 @@ class Dm3Agent:
 
             predicted_reward_bins = self.reward_predictor(posteriors, deterministics)
             predicted_reward_dist = TwoHotEncodingDistribution(predicted_reward_bins, dims=1)
-            reward_loss = -predicted_reward_dist.log_prob(data["reward"][:, 1:]).mean()
+            reward_loss = -predicted_reward_dist.log_prob(data["reward"][:, :-1]).mean()
 
             predicted_continue = self.continue_model(posteriors, deterministics)
             predicted_continue_dist = SafeBernoulli(logits=predicted_continue)
-            true_continue = 1 - data["terminated"][:, 1:]
+            true_continue = 1 - data["terminated"][:, :-1]
             continue_loss = -predicted_continue_dist.log_prob(true_continue).mean()
 
             # KL balancing, Eq. 3 in the paper
@@ -1274,7 +1277,7 @@ def main():
 
     ## logger
     _timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"{args.env_id}__{args.exp_name}__env={args.num_envs}__seed={args.seed}__{_timestamp}"
+    run_name = f"{args.env_id}__{args.exp_name}__grad={args.agent.actor_grad}__env={args.num_envs}__seed={args.seed}__{_timestamp}"
     logdir = f"logdir/{run_name}"
     os.makedirs(logdir, exist_ok=True)
     logger = make_logger(args.logger, logdir, asdict(args), wandb_entity=args.wandb_entity)
