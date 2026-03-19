@@ -28,5 +28,7 @@ services:
       - ${HOME}/.maniskill:/home/${DOCKER_USER}/.maniskill
       - ${HOME}/.cache/uv:/home/${DOCKER_USER}/.cache/uv
       - ${HOME}/.ssh:/home/${DOCKER_USER}/.ssh
+    extra_hosts:
+      - "localhost:127.0.0.1"
     tty: true  # Keeps the container running interactively
     network_mode: host

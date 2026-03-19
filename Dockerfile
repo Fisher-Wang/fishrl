@@ -56,6 +56,7 @@ RUN echo "source ${HOME}/fishrl/.venv/bin/activate" >> ${HOME}/.bashrc
 
 ## Install Claude Code
 RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN echo "alias clauded='claude --allow-dangerously-skip-permissions'" >> ${HOME}/.bashrc
 
 ########################################################
 ## Finalize
