@@ -6,7 +6,7 @@ In addition to algorithm implementations, FishRL focuses on the following practi
 
 - **Unified environment interface.** FishRL supports multiple robotics and embodied AI environments through a unified interface. This interface can be reused to quickly test new algorithms across different simulation environments with minimal additional engineering for research purposes.
 
-- **Efficient benchmarking.** For large-scale benchmarking, FishRL implements optimized training pipelines and common acceleration techniques. Inspired by [LeanRL](https://github.com/meta-pytorch/LeanRL), FishRL typically achieves 3–10× speedup compared to naïve PyTorch implementations, and is competitive with JAX-based implementations in terms of training throughput.
+- **Efficient benchmarking.** For large-scale benchmarking, FishRL implements optimized training pipelines and common acceleration techniques. Inspired by [LeanRL](https://github.com/meta-pytorch/LeanRL), FishRL typically achieves 3× speedup compared to naïve PyTorch implementations, and is competitive with JAX-based implementations in terms of training throughput.
 
 - **Single-file, readable implementations.** Following the philosophy of [CleanRL](https://github.com/vwxyzjn/cleanrl), FishRL keeps each algorithm in a single, self-contained file whenever possible, while sharing common RL utilities. This design emphasizes readability and ease of modification, making it convenient to understand, debug, and extend the algorithms.
 

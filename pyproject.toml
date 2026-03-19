@@ -14,6 +14,7 @@ dependencies = [
     "tqdm",
     "tyro",
     "wandb",
+    "matplotlib",
 
     # TODO: remove the following dependencies
     "tensorboard",
@@ -46,7 +47,7 @@ gymnasium_robotics = [
     "gymnasium-robotics",
 ]
 dmlab = [
-    # deepmind-lab: not on PyPI, must be built from source, see README
+    # deepmind-lab: not on PyPI, must be built from source, ask coding agent for help
     "six",
     "setuptools<82",  # deepmind-lab uses pkg_resources
 ]
