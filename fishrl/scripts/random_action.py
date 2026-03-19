@@ -52,7 +52,10 @@ def main(
     video_writer = VideoWriter(f"random_action_{env_id.replace('/', '_')}.mp4")
     video_writer.add(obs["rgb"])
     for _ in range(100):
-        action = torch.rand(env.action_space.shape, device=env.device) * 2 - 1
+        if hasattr(env.action_space, "nvec") or hasattr(env.action_space, "n"):  # discrete action space
+            action = torch.randint(0, int(env.action_space.nvec[0]), (num_envs,), device=env.device)
+        else:
+            action = torch.rand(env.action_space.shape, device=env.device) * 2 - 1
         obs, _, _, _, _ = env.step(action)
         video_writer.add(obs["rgb"])
     video_writer.save()

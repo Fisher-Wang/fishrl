@@ -134,8 +134,8 @@ class DMLab(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action: int | np.ndarray) -> tuple[dict[str, np.ndarray], float, bool, bool, dict]:
-        if isinstance(action, np.ndarray):
-            action = int(action.item()) if action.ndim > 0 else int(action)
+        if not isinstance(action, int):
+            action = int(action)
         raw_action = np.array(self._actions[action], dtype=np.intc)
         reward = self._env.step(raw_action, num_steps=self._action_repeat)
         self._done = not self._env.is_running()
