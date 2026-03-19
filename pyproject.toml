@@ -45,6 +45,11 @@ humanoid_bench = [
 gymnasium_robotics = [
     "gymnasium-robotics",
 ]
+dmlab = [
+    # deepmind-lab: not on PyPI, must be built from source, see README
+    "six",
+    "setuptools<82",  # deepmind-lab uses pkg_resources
+]
 maniskill = [
     "mani_skill==3.0.0b21",
 ]
