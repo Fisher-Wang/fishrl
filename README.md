@@ -15,7 +15,7 @@ In addition to algorithm implementations, FishRL focuses on the following practi
 
 ### Recommended Setup
 ```bash
-conda create -n fishrl python=3.11 -y && conda activate fishrl
+uv venv --python 3.11 && source .venv/bin/activate
 uv pip install -e ".[dmc,benchmark]"
 ```
 The `benchmark` option specifies the packages version for the reproducibility of benchmarking results.
