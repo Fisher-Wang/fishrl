@@ -924,6 +924,10 @@ class Dm3Agent:
             true_continue = 1 - data["terminated"][:, :-1]
             continue_loss = -predicted_continue_dist.log_prob(true_continue).mean()
 
+            # Reshape: (B, T, 1024) -> (B, T, 32, 32)
+            posteriors_logits = posteriors_logits.unflatten(-1, (cfg.stochastic_length, cfg.stochastic_classes))
+            prior_logits = prior_logits.unflatten(-1, (cfg.stochastic_length, cfg.stochastic_classes))
+
             # KL balancing, Eq. 3 in the paper
             kl = kl_loss1 = kl_divergence(
                 Independent(OneHotCategoricalStraightThrough(logits=posteriors_logits.detach()), 1),
@@ -1008,7 +1012,7 @@ class Dm3Agent:
             predicted_values = TwoHotEncodingDistribution(self.critic(states, deterministics), dims=1).mean
 
             continues_logits = self.continue_model(states, deterministics)
-            continues = SafeBernoulli(logits=continues_logits).mode
+            continues = SafeBernoulli(logits=continues_logits).mode  # TODO: change to mean?
             lambda_values = compute_lambda_values(
                 predicted_rewards, predicted_values, continues * cfg.gamma, cfg.horizon, cfg.gae_lambda
             )
