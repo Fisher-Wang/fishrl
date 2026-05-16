@@ -340,10 +340,9 @@ class LayerNormGRUCell(nn.Module):
                 )
         if hx.dim() == 3:
             hx = hx.squeeze(0)
-        assert input.dim() in (
-            1,
-            2,
-        ), f"LayerNormGRUCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
+        assert input.dim() in (1, 2), (
+            f"LayerNormGRUCell: Expected input to be 1-D or 2-D but received {input.dim()}-D tensor"
+        )
 
         is_batched = input.dim() == 2
         if not is_batched:
