@@ -1047,7 +1047,6 @@ class Dm3Agent:
         self.actor_scaler.step(self.actor_optimizer)
         self.actor_scaler.update()
 
-        # TODO: implement target critic
         with torch.autocast(self.device.type, enabled=self.amp):
             predicted_value_bins = self.critic(states[:, :-1].detach(), deterministics[:, :-1].detach())
             predicted_value_dist = TwoHotEncodingDistribution(predicted_value_bins, dims=1)
@@ -1383,7 +1382,7 @@ def main():
             with timer("time/logger_add"):
                 logger.add(metrics.to_dict())
 
-        # ## Logging
+        ## Logging
         if (
             args.log_every > 0
             and global_step > args.prefill
